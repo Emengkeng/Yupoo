@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: yupoo-importer
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: UPLOADTHING_TOKEN
+        sync: false        # set manually in Render dashboard
+      - key: WC_URL
+        sync: false
+      - key: WC_CONSUMER_KEY
+        sync: false
+      - key: WC_CONSUMER_SECRET
+        sync: false
+      - key: NODE_ENV
+        value: production

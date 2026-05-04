@@ -1,0 +1,25 @@
+{
+  "name": "yupoo-importer",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "^18",
+    "react-dom": "^18",
+    "puppeteer": "^22.10.0",
+    "uploadthing": "^6.13.2",
+    "@uploadthing/react": "^6.7.2",
+    "woocommerce-rest-api": "^1.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5"
+  }
+}
