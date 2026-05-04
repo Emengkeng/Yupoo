@@ -1,5 +1,9 @@
 # Yupoo → WooCommerce Importer
 
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
+> **Disclaimer:** This tool is provided for personal use only. The author is not responsible for how you use it. You are solely responsible for ensuring your use complies with Yupoo's Terms of Service, applicable copyright law, and the intellectual property rights of any content you import. Do not use this tool to import counterfeit or infringing goods.
+
 Scrape any Yupoo album, review and edit product details, then import directly into WooCommerce as a draft product — with all images re-hosted on UploadThing CDN so they never break.
 
 ## How it works
@@ -116,3 +120,11 @@ Then point Nginx to port 3000.
 - Products import as **Simple** type (draft). Add variations manually in WooCommerce after import.
 - UploadThing free tier: 2GB storage. Plenty for testing.
 - If Yupoo blocks scraping, wait 1-2 minutes and retry (they rate-limit by IP/session).
+
+---
+
+## License
+
+MIT © 2026 — see [LICENSE](./LICENSE) for full text.
+
+This software is provided "as-is" with no warranty. The author accepts no liability for misuse.
