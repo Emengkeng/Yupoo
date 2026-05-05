@@ -126,6 +126,7 @@ export async function resolveCategoryPath(
 
 export interface CreateProductPayload {
   name: string;
+  type: 'simple' | 'variable';
   description: string;
   status: 'draft' | 'publish';
   categories: { id: number }[];
@@ -137,10 +138,28 @@ export interface CreateProductPayload {
     options: string[];
   }[];
   meta_data: { key: string; value: string }[];
+  regular_price?: string;
 }
 
 export async function createWcProduct(payload: CreateProductPayload) {
   return wcFetch('/products', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface CreateVariationPayload {
+  attributes: { name: string; option: string }[];
+  image?: { id: number };
+  status: 'draft' | 'publish';
+  regular_price?: string;
+}
+
+export async function createWcVariation(
+  productId: number,
+  payload: CreateVariationPayload
+) {
+  return wcFetch(`/products/${productId}/variations`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
