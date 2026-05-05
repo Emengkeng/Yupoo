@@ -2,17 +2,27 @@ const WC_URL = process.env.WC_URL!;
 const WC_KEY = process.env.WC_CONSUMER_KEY!;
 const WC_SECRET = process.env.WC_CONSUMER_SECRET!;
 
-function wcHeaders() {
-  const credentials = Buffer.from(`${WC_KEY}:${WC_SECRET}`).toString('base64');
-  return {
-    Authorization: `Basic ${credentials}`,
-    'Content-Type': 'application/json',
-  };
+const WP_APP_USER = process.env.WP_APP_USER!;
+const WP_APP_PASSWORD = process.env.WP_APP_PASSWORD!;
+
+function wcAuth() {
+  return `Basic ${Buffer.from(`${WC_KEY}:${WC_SECRET}`).toString('base64')}`;
+}
+
+function wpAuth() {
+  return `Basic ${Buffer.from(`${WP_APP_USER}:${WP_APP_PASSWORD}`).toString('base64')}`;
 }
 
 async function wcFetch(path: string, options: RequestInit = {}) {
   const url = `${WC_URL}/wp-json/wc/v3${path}`;
-  const res = await fetch(url, { ...options, headers: { ...wcHeaders(), ...(options.headers as Record<string, string> || {}) } });
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: wcAuth(),
+      'Content-Type': 'application/json',
+      ...((options.headers as Record<string, string>) || {}),
+    },
+  });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`WooCommerce API error ${res.status}: ${body}`);
@@ -20,7 +30,40 @@ async function wcFetch(path: string, options: RequestInit = {}) {
   return res.json();
 }
 
-// ── Categories ────────────────────────────────────────────────────────────
+export async function uploadImageToWordPress(
+  imageBuffer: ArrayBuffer,
+  contentType: string,
+  filename: string
+): Promise<number> {
+  if (!WP_APP_USER || !WP_APP_PASSWORD) {
+    throw new Error(
+      'WP_APP_USER and WP_APP_PASSWORD env vars are required for media uploads. ' +
+      'Generate an Application Password at Users → your admin → Application Passwords.'
+    );
+  }
+
+  const url = `${WC_URL}/wp-json/wp/v2/media`;
+  console.log(`[wp-media] Uploading ${filename} (${imageBuffer.byteLength} bytes)`);
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: wpAuth(),
+      'Content-Type': contentType,
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    },
+    body: imageBuffer,
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`WordPress media upload error ${res.status}: ${body}`);
+  }
+
+  const media = await res.json();
+  console.log(`[wp-media] ✓ Attachment ID ${media.id}`);
+  return media.id as number;
+}
 
 export interface WcCategory {
   id: number;
@@ -48,7 +91,9 @@ export async function findOrCreateCategory(
 ): Promise<{ id: number; cats: WcCategory[] }> {
   const needle = name.trim().toLowerCase();
   const existing = existingCats.find(
-    (c) => c.name.toLowerCase() === needle && (parentId === null ? c.parent === 0 : c.parent === parentId)
+    (c) =>
+      c.name.toLowerCase() === needle &&
+      (parentId === null ? c.parent === 0 : c.parent === parentId)
   );
   if (existing) return { id: existing.id, cats: existingCats };
 
@@ -60,10 +105,6 @@ export async function findOrCreateCategory(
   return { id: created.id, cats: [...existingCats, created] };
 }
 
-/**
- * Resolve an array of category name segments (e.g. ["Sneakers", "Nike"])
- * into a WooCommerce category ID, creating missing levels on the fly.
- */
 export async function resolveCategoryPath(
   segments: string[],
   existingCats: WcCategory[]
@@ -83,14 +124,12 @@ export async function resolveCategoryPath(
   return { id: lastId, cats };
 }
 
-// ── Products ──────────────────────────────────────────────────────────────
-
 export interface CreateProductPayload {
   name: string;
   description: string;
   status: 'draft' | 'publish';
   categories: { id: number }[];
-  images: { src: string; position: number }[];
+  images: { id: number; position: number }[];
   attributes: {
     name: string;
     visible: boolean;

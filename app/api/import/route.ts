@@ -1,6 +1,11 @@
 import { NextRequest } from 'next/server';
 import { uploadImagesFromYupoo } from '@/lib/uploadthing';
-import { getAllCategories, resolveCategoryPath, createWcProduct } from '@/lib/woocommerce';
+import {
+  getAllCategories,
+  resolveCategoryPath,
+  createWcProduct,
+  uploadImageToWordPress,
+} from '@/lib/woocommerce';
 
 export const maxDuration = 300; // 5 minutes
 
@@ -9,15 +14,15 @@ export interface ImportRequest {
     albumId: string;
     storeSlug: string;
     albumUrl: string;
-    selectedImages: string[]; // subset of all scraped images user kept
+    selectedImages: string[];
   };
   product: {
     name: string;
     description: string;
-    categoryPath: string[]; // e.g. ["Sneakers", "Nike"]
+    categoryPath: string[];
     sizeType: 'sneaker' | 'tshirt' | 'none';
-    sneakerSizeRange: string; // e.g. "36-46"
-    tshirtSizes: string[]; // e.g. ["S","M","L"]
+    sneakerSizeRange: string;
+    tshirtSizes: string[];
   };
 }
 
@@ -37,40 +42,73 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        // ── 1. Validate input ──────────────────────────────────────
+        // ── 1. Validate ────────────────────────────────────────────
         if (!product.name.trim()) throw new Error('Product name is required');
         if (!album.selectedImages.length) throw new Error('No images selected');
 
         log(`Starting import for: ${product.name}`);
         log(`${album.selectedImages.length} images to upload`);
 
-        // ── 2. Upload images to UploadThing ───────────────────────
-        log('Uploading images to UploadThing CDN…');
+        // ── 2. Fetch images (+ upload to UploadThing for CDN backup) ──
+        log('Fetching and uploading images…');
         const referer = `https://${album.storeSlug}.x.yupoo.com`;
 
         const uploadResults = await uploadImagesFromYupoo(
           album.selectedImages,
           referer,
           (done, total) => {
-            log(`Uploaded ${done}/${total} images…`);
+            log(`Processed ${done}/${total} images…`);
           }
         );
 
-        const successfulUploads = uploadResults.filter((r) => r.uploadedUrl);
-        const failedUploads = uploadResults.filter((r) => !r.uploadedUrl);
+        const successful = uploadResults.filter((r) => r.buffer && r.contentType);
+        const failed = uploadResults.filter((r) => !r.buffer);
 
-        if (failedUploads.length > 0) {
-          log(`${failedUploads.length} image(s) failed to upload and will be skipped.`, 'warn');
-          failedUploads.forEach((f) => log(`  ✗ ${f.error}`, 'warn'));
+        if (failed.length > 0) {
+          log(`${failed.length} image(s) failed to fetch and will be skipped.`, 'warn');
+          failed.forEach((f) => log(`  ✗ ${f.error}`, 'warn'));
+        }
+        if (successful.length === 0) {
+          throw new Error('All image fetches failed. Check network access and try again.');
         }
 
-        if (successfulUploads.length === 0) {
-          throw new Error('All image uploads failed. Check UploadThing credentials and try again.');
+        const cacheHits = successful.filter((r) => r.fromCache).length;
+        if (cacheHits > 0) {
+          log(`⚡ ${cacheHits} image(s) reused from session cache (no re-upload)`, 'info');
+        }
+        log(`✓ ${successful.length} images ready`, 'success');
+
+        // ── 3. Upload each image directly to WordPress Media Library ──
+        log('Uploading images to WordPress media library…');
+        const wpMediaIds: { id: number; position: number }[] = [];
+        let wpFailed = 0;
+
+        for (let i = 0; i < successful.length; i++) {
+          const img = successful[i];
+          try {
+            const mediaId = await uploadImageToWordPress(
+              img.buffer!,
+              img.contentType!,
+              img.filename!
+            );
+            wpMediaIds.push({ id: mediaId, position: i });
+            log(`  ✓ Image ${i + 1}/${successful.length} → WP media #${mediaId}`);
+          } catch (err) {
+            wpFailed++;
+            const msg = err instanceof Error ? err.message : String(err);
+            log(`  ✗ Image ${i + 1} failed WP upload: ${msg}`, 'warn');
+          }
         }
 
-        log(`✓ ${successfulUploads.length} images uploaded to CDN`, 'success');
+        if (wpMediaIds.length === 0) {
+          throw new Error('All WordPress media uploads failed. Check WP credentials and file permissions.');
+        }
+        if (wpFailed > 0) {
+          log(`${wpFailed} image(s) skipped due to WP upload errors.`, 'warn');
+        }
+        log(`✓ ${wpMediaIds.length} images in WordPress media library`, 'success');
 
-        // ── 3. Resolve WooCommerce categories ─────────────────────
+        // ── 4. Resolve WooCommerce categories ──────────────────────
         let categoryId: number | null = null;
         if (product.categoryPath.length > 0 && product.categoryPath[0]) {
           log('Resolving categories in WooCommerce…');
@@ -80,7 +118,7 @@ export async function POST(req: NextRequest) {
           log(`✓ Category resolved: ${product.categoryPath.join(' › ')}`, 'success');
         }
 
-        // ── 4. Build size attributes ──────────────────────────────
+        // ── 5. Build size attributes ────────────────────────────────
         const attributes = [];
 
         if (product.sizeType === 'sneaker' && product.sneakerSizeRange) {
@@ -102,20 +140,15 @@ export async function POST(req: NextRequest) {
           });
         }
 
-        // ── 5. Create WooCommerce product ─────────────────────────
+        // ── 6. Create WooCommerce product ───────────────────────────
         log('Creating product in WooCommerce…');
-
-        const wcImages = successfulUploads.map((u, i) => ({
-          src: u.uploadedUrl!,
-          position: i,
-        }));
 
         const payload = {
           name: product.name,
           description: product.description,
           status: 'draft' as const,
           categories: categoryId ? [{ id: categoryId }] : [],
-          images: wcImages,
+          images: wpMediaIds, // WP attachment IDs — no URL sideloading needed
           attributes,
           meta_data: [
             { key: '_yupoo_album_id', value: album.albumId },
@@ -132,8 +165,8 @@ export async function POST(req: NextRequest) {
           type: 'done',
           productId: created.id,
           productUrl: `${process.env.WC_URL}/wp-admin/post.php?post=${created.id}&action=edit`,
-          uploadedImages: successfulUploads.length,
-          failedImages: failedUploads.length,
+          uploadedImages: wpMediaIds.length,
+          failedImages: failed.length + wpFailed,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
@@ -163,6 +196,5 @@ function expandSneakerRange(raw: string): string[] {
       return Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i));
     }
   }
-  // Single value or unrecognised — return as-is
   return raw.trim() ? [raw.trim()] : [];
 }
