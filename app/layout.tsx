@@ -4,6 +4,7 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Yupoo → WooCommerce Importer',
   description: 'Scrape Yupoo albums and import them as WooCommerce products',
+  icons: { icon: '/favicon.svg' },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
