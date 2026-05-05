@@ -6,7 +6,7 @@ const fileRouter = {
   imageUploader: f({ image: { maxFileSize: '8MB', maxFileCount: 1 } })
     .middleware(() => ({ ok: true }))
     .onUploadComplete(({ file }) => {
-      return { url: file.url };
+      return { url: file.ufsUrl };
     }),
 };
 

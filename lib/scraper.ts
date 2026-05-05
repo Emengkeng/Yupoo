@@ -12,9 +12,6 @@ export interface ScrapedAlbum {
 
 /**
  * Normalise any Yupoo album URL into a canonical form and extract parts.
- * Handles:
- *   https://storename.x.yupoo.com/albums/123456?uid=1
- *   https://x.yupoo.com/photos/storename/albums/123456
  */
 export function parseYupooUrl(raw: string): {
   storeSlug: string;
@@ -83,30 +80,32 @@ async function scrapeAlbumPage(
   albumId: string,
   pageNum: number
 ): Promise<{ images: string[]; title: string; category: string | null; hasNextPage: boolean }> {
-  const pageUrl = pageNum > 1 ? `${url}?page=${pageNum}` : url;
+  // Use ?tab=nor (detail view) — it renders all data-origin-src in the HTML
+  const baseUrl = pageNum > 1 ? `${url}?page=${pageNum}&uid=1` : `${url}?uid=1`;
   const page = await browser.newPage();
 
   try {
-    // Set realistic headers so Yupoo treats us as a browser
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'en-US,en;q=0.9',
-      Referer: `https://${storeSlug}.x.yupoo.com/albums`,
+      'Referer': `https://${storeSlug}.x.yupoo.com/albums`,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     });
 
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
 
-    await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // networkidle2 ensures JS has run and lazy-loaded attrs are set
+    await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 45000 });
 
-    // Wait for images to appear
-    await page.waitForSelector('img', { timeout: 15000 }).catch(() => {});
+    // Wait for the image cards to appear
+    await page.waitForSelector('.showalbum__children', { timeout: 20000 }).catch(() => {});
 
-    // Scroll slowly to trigger lazy loading
+    // Scroll to trigger any remaining lazy loaders
     await page.evaluate(async () => {
       await new Promise<void>((resolve) => {
         let totalHeight = 0;
-        const distance = 300;
+        const distance = 200;
         const timer = setInterval(() => {
           window.scrollBy(0, distance);
           totalHeight += distance;
@@ -114,30 +113,24 @@ async function scrapeAlbumPage(
             clearInterval(timer);
             resolve();
           }
-        }, 120);
+        }, 80);
       });
     });
 
-    // Extra pause for any deferred loads
     await new Promise((r) => setTimeout(r, 1500));
 
     const result = await page.evaluate((slug: string) => {
       // ── Title ─────────────────────────────────────────────
       const titleEl =
-        document.querySelector('.album__title') ||
+        document.querySelector('.showalbumheader__gallerytitle') ||
         document.querySelector('h1') ||
-        document.querySelector('.showalbum__title') ||
         document.querySelector('title');
       const title = (titleEl?.textContent || '').trim().replace(/\s*[-|].*$/, '').trim();
 
       // ── Category ──────────────────────────────────────────
-      const breadcrumbs = Array.from(
-        document.querySelectorAll('.breadcrumb a, .crumb a, nav a')
-      )
-        .map((el) => el.textContent?.trim())
-        .filter(Boolean)
-        .filter((t) => t !== 'Home' && t !== slug);
-      const category = breadcrumbs.length > 0 ? breadcrumbs[breadcrumbs.length - 1]! : null;
+      // Look in the viewer info panel which reliably has the category link
+      const catEl = document.querySelector('.viewer__catewrap a, .yupoo-viewer-cate-item a');
+      const category = catEl ? (catEl.textContent || '').trim() : null;
 
       // ── Images ────────────────────────────────────────────
       const seen = new Set<string>();
@@ -145,24 +138,33 @@ async function scrapeAlbumPage(
 
       const pushIfValid = (src: string | null | undefined) => {
         if (!src) return;
-        // Filter out tiny icons, avatars, placeholders
-        if (src.includes('avatar') || src.includes('placeholder') || src.includes('loading'))
-          return;
-        // Only accept photo CDN URLs
-        if (!src.includes('photo.yupoo.com') && !src.includes('img.yupoo.com') && !src.includes('x.yupoo.com/photos'))
-          return;
-        if (seen.has(src)) return;
-        seen.add(src);
-        images.push(src);
+        const s = src.trim();
+        if (!s) return;
+        if (s.startsWith('data:')) return;
+        // Filter out avatars / loading placeholders
+        if (s.includes('avatar') || s.includes('placeholder') || s.includes('loading')) return;
+        // Only Yupoo photo CDN
+        if (!s.includes('photo.yupoo.com') && !s.includes('img.yupoo.com')) return;
+        if (seen.has(s)) return;
+        seen.add(s);
+        images.push(s);
       };
 
-      document.querySelectorAll('img').forEach((img) => {
-        // Prefer full-res origin src attributes set by lazy loaders
+      // Primary: data-origin-src on every img inside album children
+      document.querySelectorAll('.showalbum__children img').forEach((img) => {
         pushIfValid(img.getAttribute('data-origin-src'));
-        pushIfValid(img.getAttribute('data-src'));
-        pushIfValid(img.getAttribute('data-lazy-src'));
-        pushIfValid(img.getAttribute('src'));
+        pushIfValid(img.getAttribute('data-src'));   // fallback: big.jpg variant
+        pushIfValid(img.getAttribute('src'));          // last resort
       });
+
+      // Fallback: all imgs on page if we got nothing
+      if (images.length === 0) {
+        document.querySelectorAll('img').forEach((img) => {
+          pushIfValid(img.getAttribute('data-origin-src'));
+          pushIfValid(img.getAttribute('data-src'));
+          pushIfValid(img.getAttribute('src'));
+        });
+      }
 
       // ── Pagination ────────────────────────────────────────
       const hasNextPage = !!document.querySelector(
@@ -171,6 +173,8 @@ async function scrapeAlbumPage(
 
       return { title, category, images, hasNextPage };
     }, storeSlug);
+
+    console.log(`Scraped page ${pageNum} of album ${albumId}: found ${result.images.length} images.`);
 
     return result;
   } finally {
@@ -207,13 +211,12 @@ export async function scrapeAlbum(rawUrl: string): Promise<ScrapedAlbum> {
     if (!result.hasNextPage) break;
     page++;
 
-    // Polite delay between pages
     await new Promise((r) => setTimeout(r, 800));
   }
 
   if (allImages.length === 0) {
     throw new Error(
-      'No images found in this album. The album may be empty, private, or Yupoo is blocking access — try again in a minute.'
+      'No images found. The album may be empty, private, or Yupoo is blocking access — try again in a minute.'
     );
   }
 
