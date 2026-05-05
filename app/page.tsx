@@ -29,6 +29,16 @@ interface LogEntry {
   ts: number;
 }
 
+type QueueStatus = 'pending' | 'scraping' | 'ready' | 'importing' | 'done' | 'failed';
+
+interface QueueItem {
+  id: string;
+  url: string;
+  status: QueueStatus;
+  productName?: string;
+  error?: string;
+}
+
 const TSHIRT_SIZES = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
 
 const CATEGORY_TREE: Record<string, Record<string, string[]>> = {
@@ -52,8 +62,11 @@ const CATEGORY_TREE: Record<string, Record<string, string[]>> = {
 // ── Main Component ────────────────────────────────────────────────────────
 
 export default function Home() {
-  // Input
-  const [albumUrl, setAlbumUrl] = useState('');
+  // ── Queue state ──────────────────────────────────────────────────────────
+  const [queueInput, setQueueInput] = useState('');
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [currentIndex, setCurrentIndex] = useState<number | null>(null);
+  const [showQueueInput, setShowQueueInput] = useState(true);
 
   // Scraping state
   const [scraping, setScraping] = useState(false);
@@ -69,7 +82,6 @@ export default function Home() {
   const [tshirtSizes, setTshirtSizes] = useState<Set<string>>(new Set());
 
   // Category state
-  const [wcCategories, setWcCategories] = useState<WcCategory[]>([]);
   const [quickGender, setQuickGender] = useState('');
   const [quickSub, setQuickSub] = useState('');
   const [quickBrand, setQuickBrand] = useState('');
@@ -98,13 +110,8 @@ export default function Home() {
   const [pickerOpenForId, setPickerOpenForId] = useState<string | null>(null);
   const [regularPrice, setRegularPrice] = useState('');
 
-  // Load WC categories on mount
-  // useEffect(() => {
-  //   fetch('/api/wc-categories')
-  //     .then((r) => r.json())
-  //     .then((d) => { if (d.categories) setWcCategories(d.categories); })
-  //     .catch(() => {});
-  // }, []);
+  // Sneaker range for variable size
+  const [varSneakerRange, setVarSneakerRange] = useState('');
 
   // Auto-scroll logs
   useEffect(() => {
@@ -115,7 +122,113 @@ export default function Home() {
     setLogs((prev) => [...prev, { id: ++logCounter.current, message, level, ts: Date.now() }]);
   }, []);
 
-  // Builds the *current picker selection* as a single path (not yet committed)
+  // ── Queue helpers ─────────────────────────────────────────────────────────
+
+  function buildQueue() {
+    const urls = queueInput
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (urls.length === 0) return;
+    const items: QueueItem[] = urls.map((url) => ({
+      id: Math.random().toString(36).slice(2),
+      url,
+      status: 'pending',
+    }));
+    setQueue(items);
+    setCurrentIndex(null);
+    setAlbum(null);
+    setImportDone(null);
+    setLogs([]);
+    setShowQueueInput(false);
+  }
+
+  function updateQueueStatus(index: number, patch: Partial<QueueItem>) {
+    setQueue((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+  }
+
+  // Captures current "carry-over" settings (everything except name, images, variations)
+  function captureSettings() {
+    return {
+      categoryPaths,
+      regularPrice,
+      sizeType,
+      sneakerRange,
+      tshirtSizes: new Set(tshirtSizes),
+      productType,
+      productStatus,
+      variationAttribute,
+    };
+  }
+
+  async function scrapeIndex(index: number) {
+    const item = queue[index];
+    if (!item) return;
+
+    setScraping(true);
+    setScrapeError('');
+    setAlbum(null);
+    setImportDone(null);
+    setLogs([]);
+    updateQueueStatus(index, { status: 'scraping' });
+
+    try {
+      const res = await fetch('/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: item.url }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setScrapeError(data.error || 'Scraping failed');
+        updateQueueStatus(index, { status: 'failed', error: data.error || 'Scraping failed' });
+        return;
+      }
+
+      const a: ScrapedAlbum = data.album;
+      setAlbum(a);
+      setProductName(a.title);
+      setDescription('');
+      setSelectedImages(new Set(a.images));
+      setVariations([]);
+      setPickerOpenForId(null);
+      setVarSneakerRange('');
+
+      // Prefill category from album if no category is set yet, otherwise keep existing
+      if (categoryPaths.length === 0 && a.category) {
+        setCategoryPaths([a.category.split('/').map((s) => s.trim()).filter(Boolean)]);
+      }
+
+      updateQueueStatus(index, { status: 'ready', productName: a.title });
+      setCurrentIndex(index);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Network error';
+      setScrapeError(msg);
+      updateQueueStatus(index, { status: 'failed', error: msg });
+    } finally {
+      setScraping(false);
+    }
+  }
+
+  async function startQueue() {
+    buildQueue();
+  }
+
+  // Called after a successful import — advance to next pending item
+  async function handleNext() {
+    if (currentIndex === null) return;
+    // Save current settings to carry over
+    // (state already reflects current values, nothing to do)
+
+    // Find next pending item
+    const nextIndex = queue.findIndex((item, i) => i > currentIndex && item.status === 'pending');
+    if (nextIndex === -1) return; // no more items
+
+    await scrapeIndex(nextIndex);
+  }
+
+  // ── Category helpers ──────────────────────────────────────────────────────
+
   function buildCurrentPath(): string[] {
     if (customCat.trim()) {
       return customCat.split('/').map((s) => s.trim()).filter(Boolean);
@@ -130,11 +243,9 @@ export default function Home() {
   function addCurrentCategory() {
     const path = buildCurrentPath();
     if (path.length === 0) return;
-    // Avoid exact duplicates
     const key = path.join(' > ');
     if (categoryPaths.some((p) => p.join(' > ') === key)) return;
     setCategoryPaths((prev) => [...prev, path]);
-    // Reset picker
     setQuickGender('');
     setQuickSub('');
     setQuickBrand('');
@@ -145,61 +256,13 @@ export default function Home() {
     setCategoryPaths((prev) => prev.filter((_, i) => i !== index));
   }
 
-  // Add this helper near the top of the component
   function proxyUrl(original: string, storeSlug: string) {
     const ref = encodeURIComponent(`https://${storeSlug}.x.yupoo.com`);
     return `/api/proxy-image?url=${encodeURIComponent(original)}&ref=${ref}`;
   }
 
-  // ── Scrape ───────────────────────────────────────────────────────────────
-  async function handleScrape() {
-    if (!albumUrl.trim()) return;
-    setScraping(true);
-    setScrapeError('');
-    setAlbum(null);
-    setImportDone(null);
-    setLogs([]);
-
-    try {
-      const res = await fetch('/api/scrape', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: albumUrl.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        setScrapeError(data.error || 'Scraping failed');
-        return;
-      }
-
-      const a: ScrapedAlbum = data.album;
-      setAlbum(a);
-      setProductName(a.title);
-      setDescription('');
-      setSelectedImages(new Set(a.images));
-
-      setQuickGender('');
-      setQuickSub('');
-      setQuickBrand('');
-      setCustomCat('');
-      setCategoryPaths(a.category
-        ? [a.category.split('/').map((s) => s.trim()).filter(Boolean)]
-        : []);
-      
-      setProductType('simple');
-      setProductStatus('draft');
-      setVariationAttribute('');
-      setVariations([]);
-      setPickerOpenForId(null);
-
-    } catch (err) {
-      setScrapeError(err instanceof Error ? err.message : 'Network error');
-    } finally {
-      setScraping(false);
-    }
-  }
-
   // ── Image selection ──────────────────────────────────────────────────────
+
   function toggleImage(url: string) {
     setSelectedImages((prev) => {
       const next = new Set(prev);
@@ -212,9 +275,62 @@ export default function Home() {
   function selectAll() { if (album) setSelectedImages(new Set(album.images)); }
   function deselectAll() { setSelectedImages(new Set()); }
 
-  // ── Import ───────────────────────────────────────────────────────────────
+  // ── Variable size helpers ─────────────────────────────────────────────────
+
+  function autoFillSneakerVariations() {
+    const m = varSneakerRange.trim().match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (!m) return;
+    const lo = parseInt(m[1]), hi = parseInt(m[2]);
+    if (isNaN(lo) || isNaN(hi) || lo > hi || hi - lo > 60) return;
+    const sizes = Array.from({ length: hi - lo + 1 }, (_, i) => String(lo + i));
+    setVariations(sizes.map((sz) => ({
+      id: Math.random().toString(36).slice(2),
+      value: sz,
+      imageUrl: null,
+    })));
+  }
+
+  function autoFillTshirtVariations() {
+    setVariations(TSHIRT_SIZES.map((sz) => ({
+      id: Math.random().toString(36).slice(2),
+      value: sz,
+      imageUrl: null,
+    })));
+  }
+
+  function sneakerPreview(raw: string): string {
+    const m = raw.trim().match(/^(\d+)\s*[-–—]\s*(\d+)$/);
+    if (m) {
+      const lo = parseInt(m[1]), hi = parseInt(m[2]);
+      if (!isNaN(lo) && !isNaN(hi) && lo <= hi && hi - lo <= 60) {
+        return `${lo}, ${lo + 1}, … ${hi}  (${hi - lo + 1} sizes)`;
+      }
+    }
+    return raw.trim() ? raw.trim() : '';
+  }
+
+  // ── Variation helpers ─────────────────────────────────────────────────────
+
+  function addVariation() {
+    setVariations((prev) => [
+      ...prev,
+      { id: Math.random().toString(36).slice(2), value: '', imageUrl: null },
+    ]);
+  }
+
+  function removeVariation(id: string) {
+    setVariations((prev) => prev.filter((v) => v.id !== id));
+  }
+
+  function updateVariation(id: string, patch: Partial<{ value: string; imageUrl: string | null }>) {
+    setVariations((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
+  }
+
+  // ── Import ────────────────────────────────────────────────────────────────
+
   async function handleImport() {
     if (!album || !productName.trim() || selectedImages.size === 0) return;
+    if (currentIndex !== null) updateQueueStatus(currentIndex, { status: 'importing' });
 
     setImporting(true);
     setLogs([]);
@@ -275,48 +391,40 @@ export default function Home() {
                 status: event.status,
                 variationsCreated: event.variationsCreated ?? 0,
               });
+              if (currentIndex !== null) {
+                updateQueueStatus(currentIndex, { status: 'done', productName });
+              }
             } else if (event.type === 'error') {
               addLog(event.message, 'error');
+              if (currentIndex !== null) {
+                updateQueueStatus(currentIndex, { status: 'failed', error: event.message });
+              }
             }
           } catch {}
         }
       }
     } catch (err) {
       addLog(err instanceof Error ? err.message : 'Import failed', 'error');
+      if (currentIndex !== null) {
+        updateQueueStatus(currentIndex, { status: 'failed' });
+      }
     } finally {
       setImporting(false);
     }
   }
 
-  // ── Sneaker size preview ─────────────────────────────────────────────────
-  function sneakerPreview(raw: string): string {
-    const m = raw.trim().match(/^(\d+)\s*[-–—]\s*(\d+)$/);
-    if (m) {
-      const lo = parseInt(m[1]), hi = parseInt(m[2]);
-      if (!isNaN(lo) && !isNaN(hi) && lo <= hi && hi - lo <= 60) {
-        const count = hi - lo + 1;
-        return `${lo}, ${lo + 1}, … ${hi}  (${count} sizes)`;
-      }
-    }
-    return raw.trim() ? raw.trim() : '';
-  }
+  // ── Computed ──────────────────────────────────────────────────────────────
 
-  function addVariation() {
-    setVariations((prev) => [
-      ...prev,
-      { id: Math.random().toString(36).slice(2), value: '', imageUrl: null },
-    ]);
-  }
+  const pendingAfterCurrent = currentIndex !== null
+    ? queue.filter((item, i) => i > currentIndex && item.status === 'pending').length
+    : 0;
 
-  function removeVariation(id: string) {
-    setVariations((prev) => prev.filter((v) => v.id !== id));
-  }
+  const queueTotal = queue.length;
+  const queueDone = queue.filter((i) => i.status === 'done').length;
+  const isLastItem = pendingAfterCurrent === 0 && currentIndex !== null;
 
-  function updateVariation(id: string, patch: Partial<{ value: string; imageUrl: string | null }>) {
-    setVariations((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
-  }
+  // ── Render ────────────────────────────────────────────────────────────────
 
-  // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className={styles.page}>
       {/* ── Header ── */}
@@ -327,47 +435,106 @@ export default function Home() {
             Yupoo Importer
           </div>
           <div className={styles.headerMeta}>
+            {queueTotal > 0 && (
+              <span className={styles.queueProgress}>
+                {queueDone}/{queueTotal} done
+              </span>
+            )}
             <span className={styles.pill}>WooCommerce</span>
           </div>
         </div>
       </header>
 
       <main className={styles.main}>
-        {/* ── URL Input ── */}
-        <section className={styles.card}>
-          <div className={styles.cardHead}>
-            <span className={styles.stepNum}>01</span>
-            <h2 className={styles.cardTitle}>Album URL</h2>
-          </div>
-          <div className={styles.urlRow}>
-            <input
-              type="url"
-              value={albumUrl}
-              onChange={(e) => setAlbumUrl(e.target.value)}
-              placeholder="https://storename.x.yupoo.com/albums/123456"
-              onKeyDown={(e) => e.key === 'Enter' && handleScrape()}
-              disabled={scraping}
-            />
-            <button
-              className={styles.btnPrimary}
-              onClick={handleScrape}
-              disabled={scraping || !albumUrl.trim()}
-            >
-              {scraping ? (
-                <><span className={styles.spinner} /> Scraping…</>
-              ) : 'Fetch Album'}
-            </button>
-          </div>
-          {scrapeError && (
-            <div className={styles.errorBox}>
-              <span className={styles.errorIcon}>⚠</span>
-              <pre className={styles.errorText}>{scrapeError}</pre>
+
+        {/* ── Queue Input ── */}
+        {showQueueInput ? (
+          <section className={styles.card}>
+            <div className={styles.cardHead}>
+              <span className={styles.stepNum}>01</span>
+              <h2 className={styles.cardTitle}>Album URLs</h2>
             </div>
-          )}
-          <p className={styles.hint}>
-            Supports: <code>storename.x.yupoo.com/albums/ID</code> or <code>x.yupoo.com/photos/storename/albums/ID</code>
-          </p>
-        </section>
+            <div className={styles.fieldGroup}>
+              <label>Paste one URL per line</label>
+              <textarea
+                value={queueInput}
+                onChange={(e) => setQueueInput(e.target.value)}
+                placeholder={`https://storename.x.yupoo.com/albums/111111\nhttps://storename.x.yupoo.com/albums/222222\nhttps://storename.x.yupoo.com/albums/333333`}
+                rows={5}
+              />
+            </div>
+            <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
+              <button
+                className={styles.btnPrimary}
+                onClick={startQueue}
+                disabled={!queueInput.trim()}
+              >
+                Start Queue ({queueInput.split('\n').filter((l) => l.trim()).length} URLs)
+              </button>
+            </div>
+            <p className={styles.hint} style={{ marginTop: 10 }}>
+              You'll review and import each product one at a time. Supports: <code>storename.x.yupoo.com/albums/ID</code>
+            </p>
+          </section>
+        ) : (
+          /* ── Queue status bar ── */
+          <section className={styles.card}>
+            <div className={styles.cardHead}>
+              <span className={styles.stepNum}>01</span>
+              <h2 className={styles.cardTitle}>Queue</h2>
+              <button
+                className={styles.btnGhost}
+                style={{ marginLeft: 'auto' }}
+                onClick={() => { setShowQueueInput(true); setQueue([]); setCurrentIndex(null); setAlbum(null); }}
+              >
+                ✕ Reset
+              </button>
+            </div>
+            <div className={styles.queueList}>
+              {queue.map((item, i) => (
+                <div
+                  key={item.id}
+                  className={`${styles.queueItem} ${
+                    i === currentIndex ? styles.queueItemActive :
+                    item.status === 'done' ? styles.queueItemDone :
+                    item.status === 'failed' ? styles.queueItemFailed : ''
+                  }`}
+                >
+                  <span className={styles.queueNum}>{i + 1}</span>
+                  <span className={styles.queueUrl}>{item.url}</span>
+                  <span className={styles.queueStatusBadge} data-status={item.status}>
+                    {item.status === 'pending' && '⋯'}
+                    {item.status === 'scraping' && '↻'}
+                    {item.status === 'ready' && '✎'}
+                    {item.status === 'importing' && '↑'}
+                    {item.status === 'done' && '✓'}
+                    {item.status === 'failed' && '✗'}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Scrape first item if queue was just built and nothing is current */}
+            {currentIndex === null && queue.length > 0 && (
+              <button
+                className={styles.btnPrimary}
+                style={{ marginTop: 12 }}
+                onClick={() => scrapeIndex(0)}
+                disabled={scraping}
+              >
+                {scraping ? <><span className={styles.spinner} /> Scraping…</> : 'Start → Scrape First Product'}
+              </button>
+            )}
+          </section>
+        )}
+
+        {/* ── Scrape error ── */}
+        {scrapeError && (
+          <div className={styles.errorBox}>
+            <span className={styles.errorIcon}>⚠</span>
+            <pre className={styles.errorText}>{scrapeError}</pre>
+          </div>
+        )}
 
         {/* ── Edit Panel ── */}
         {album && (
@@ -417,49 +584,32 @@ export default function Home() {
               <div className={styles.fieldSection}>
                 <label>Category</label>
 
-                {/* Selected categories (committed) */}
                 {categoryPaths.length > 0 && (
                   <div className={styles.catSelected}>
                     {categoryPaths.map((path, i) => (
                       <span key={i} className={styles.catSelectedTag}>
                         {path.join(' › ')}
-                        <button
-                          className={styles.catRemoveBtn}
-                          onClick={() => removeCategory(i)}
-                          title="Remove"
-                        >
-                          ✕
-                        </button>
+                        <button className={styles.catRemoveBtn} onClick={() => removeCategory(i)} title="Remove">✕</button>
                       </span>
                     ))}
                   </div>
                 )}
 
-                {/* Quick-pick: gender */}
                 <div className={styles.catPickerRow} style={{ marginTop: categoryPaths.length ? 10 : 0 }}>
                   {Object.keys(CATEGORY_TREE).map((gender) => (
                     <button
                       key={gender}
                       className={`${styles.catChip} ${quickGender === gender && !customCat.trim() ? styles.catChipActive : ''}`}
-                      onClick={() => {
-                        setQuickGender(gender);
-                        setQuickSub('');
-                        setQuickBrand('');
-                        setCustomCat('');
-                      }}
+                      onClick={() => { setQuickGender(gender); setQuickSub(''); setQuickBrand(''); setCustomCat(''); }}
                     >
                       {gender === 'Men' ? '♂' : '♀'} {gender}
                     </button>
                   ))}
-                  <button
-                    className={styles.catChip}
-                    onClick={() => { setQuickGender(''); setQuickSub(''); setQuickBrand(''); setCustomCat(''); }}
-                  >
+                  <button className={styles.catChip} onClick={() => { setQuickGender(''); setQuickSub(''); setQuickBrand(''); setCustomCat(''); }}>
                     ✕ Clear
                   </button>
                 </div>
 
-                {/* Subcategory row */}
                 {quickGender && !customCat.trim() && (
                   <div className={styles.catPickerRow} style={{ marginTop: 8 }}>
                     {Object.keys(CATEGORY_TREE[quickGender]).map((sub) => (
@@ -474,16 +624,9 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Brand row */}
-                {quickGender && quickSub && !customCat.trim() &&
-                  CATEGORY_TREE[quickGender][quickSub]?.length > 0 && (
+                {quickGender && quickSub && !customCat.trim() && CATEGORY_TREE[quickGender][quickSub]?.length > 0 && (
                   <div className={styles.catPickerRow} style={{ marginTop: 8 }}>
-                    <button
-                      className={`${styles.catChip} ${!quickBrand ? styles.catChipActive : ''}`}
-                      onClick={() => setQuickBrand('')}
-                    >
-                      All brands
-                    </button>
+                    <button className={`${styles.catChip} ${!quickBrand ? styles.catChipActive : ''}`} onClick={() => setQuickBrand('')}>All brands</button>
                     {CATEGORY_TREE[quickGender][quickSub].map((brand) => (
                       <button
                         key={brand}
@@ -496,30 +639,21 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* Custom override */}
                 <div style={{ marginTop: 10 }}>
                   <label>Or type custom path (use / for hierarchy)</label>
                   <input
                     type="text"
                     value={customCat}
-                    onChange={(e) => {
-                      setCustomCat(e.target.value);
-                      if (e.target.value.trim()) { setQuickGender(''); setQuickSub(''); setQuickBrand(''); }
-                    }}
+                    onChange={(e) => { setCustomCat(e.target.value); if (e.target.value.trim()) { setQuickGender(''); setQuickSub(''); setQuickBrand(''); } }}
                     placeholder="e.g. Men / Sneakers / Nike"
                     onKeyDown={(e) => e.key === 'Enter' && addCurrentCategory()}
                   />
                 </div>
 
-                {/* Preview + Add button */}
                 {buildCurrentPath().length > 0 && (
                   <div className={styles.catAddRow}>
-                    <span className={styles.catPreview}>
-                      {buildCurrentPath().join(' › ')}
-                    </span>
-                    <button className={styles.catAddBtn} onClick={addCurrentCategory}>
-                      + Add category
-                    </button>
+                    <span className={styles.catPreview}>{buildCurrentPath().join(' › ')}</span>
+                    <button className={styles.catAddBtn} onClick={addCurrentCategory}>+ Add category</button>
                   </div>
                 )}
               </div>
@@ -540,11 +674,11 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Variable product: attribute + variations */}
+              {/* Variable product */}
               {productType === 'variable' && (
                 <div className={styles.fieldSection}>
                   <div className={styles.fieldGroup}>
-                    <label>Variation attribute name (e.g. Color, Colorway, Style)</label>
+                    <label>Variation attribute name (e.g. Color, Size, Style)</label>
                     <input
                       type="text"
                       value={variationAttribute}
@@ -553,8 +687,43 @@ export default function Home() {
                     />
                   </div>
 
+                  {/* Size quick-fill — shown when attribute looks like "Size" */}
+                  {variationAttribute.trim().toLowerCase() === 'size' && (
+                    <div className={styles.sizeQuickFill}>
+                      <span className={styles.sizeQuickLabel}>Quick fill sizes:</span>
+
+                      {/* Sneaker range */}
+                      <div className={styles.sizeQuickRow}>
+                        <input
+                          type="text"
+                          className={styles.sizeQuickInput}
+                          value={varSneakerRange}
+                          onChange={(e) => setVarSneakerRange(e.target.value)}
+                          placeholder="e.g. 36-46"
+                        />
+                        <button
+                          className={styles.sizeQuickBtn}
+                          onClick={autoFillSneakerVariations}
+                          disabled={!varSneakerRange.trim().match(/^\d+\s*[-–—]\s*\d+$/)}
+                        >
+                          👟 Fill Sneaker Sizes
+                        </button>
+                      </div>
+                      {sneakerPreview(varSneakerRange) && (
+                        <div className={styles.sizePreview}>{sneakerPreview(varSneakerRange)}</div>
+                      )}
+
+                      {/* T-shirt sizes */}
+                      <div className={styles.sizeQuickRow} style={{ marginTop: 8 }}>
+                        <button className={styles.sizeQuickBtn} onClick={autoFillTshirtVariations}>
+                          👕 Fill T-Shirt Sizes (XS → XXXL)
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ marginTop: 12 }}>
-                    <label>Variations</label>
+                    <label>Variations {variations.length > 0 && `(${variations.length})`}</label>
                     {variations.map((v) => (
                       <div key={v.id} className={styles.variationRow}>
                         <input
@@ -562,10 +731,9 @@ export default function Home() {
                           className={styles.variationInput}
                           value={v.value}
                           onChange={(e) => updateVariation(v.id, { value: e.target.value })}
-                          placeholder="e.g. Red, Blue, White…"
+                          placeholder="e.g. Red, 42, XL…"
                         />
 
-                        {/* Image picker for this variation */}
                         <button
                           className={`${styles.varImgBtn} ${v.imageUrl ? styles.varImgBtnSet : ''}`}
                           onClick={() => setPickerOpenForId(pickerOpenForId === v.id ? null : v.id)}
@@ -577,16 +745,11 @@ export default function Home() {
                               alt="variation"
                               className={styles.varImgPreview}
                             />
-                          ) : '🖼 Image'}
+                          ) : '🖼'}
                         </button>
 
-                        <button
-                          className={styles.btnGhost}
-                          onClick={() => removeVariation(v.id)}
-                          title="Remove variation"
-                        >✕</button>
+                        <button className={styles.btnGhost} onClick={() => removeVariation(v.id)} title="Remove">✕</button>
 
-                        {/* Inline image picker */}
                         {pickerOpenForId === v.id && (
                           <div className={styles.varPickerGrid}>
                             <button
@@ -614,20 +777,20 @@ export default function Home() {
                     ))}
 
                     <button className={styles.btnGhost} style={{ marginTop: 8 }} onClick={addVariation}>
-                      + Add variation
+                      + Add variation manually
                     </button>
 
                     {variations.length > 0 && (
                       <p className={styles.hint} style={{ marginTop: 8 }}>
                         Each variation gets one representative image. All selected images go to the parent product gallery.
-                        Set prices per variation in WooCommerce after import.
+                        Price from the field above is applied to every variation.
                       </p>
                     )}
                   </div>
                 </div>
               )}
 
-              {/* Size — only for simple products */}
+              {/* Size — simple products only */}
               {productType === 'simple' && (
                 <div className={styles.fieldSection}>
                   <label>Size</label>
@@ -704,12 +867,10 @@ export default function Home() {
                       onClick={() => toggleImage(img)}
                       title={selected ? 'Click to deselect' : 'Click to select'}
                     >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={proxyUrl(img, album.storeSlug)}
                         alt={`Image ${i + 1}`}
                         loading="lazy"
-                        // referrerPolicy="no-referrer"
                         onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.2'; }}
                       />
                       <div className={styles.imgOverlay}>
@@ -720,10 +881,6 @@ export default function Home() {
                   );
                 })}
               </div>
-
-              <p className={styles.hint} style={{ marginTop: 12 }}>
-                Note: Images may appear broken in preview due to Yupoo's referer policy — they will download correctly during import.
-              </p>
             </section>
 
             {/* ── Import ── */}
@@ -756,9 +913,20 @@ export default function Home() {
                     {productStatus === 'publish' ? 'Live' : 'Draft'}
                   </span>
                 </div>
+                {regularPrice && (
+                  <div className={styles.summaryItem}>
+                    <span className={styles.summaryLabel}>Price</span>
+                    <span className={styles.summaryValue}>{regularPrice}</span>
+                  </div>
+                )}
+                {productType === 'variable' && variations.length > 0 && (
+                  <div className={styles.summaryItem}>
+                    <span className={styles.summaryLabel}>Variations</span>
+                    <span className={styles.summaryValue}>{variations.filter(v => v.value.trim()).length}</span>
+                  </div>
+                )}
               </div>
 
-              {/* Status toggle */}
               <div className={styles.statusRow}>
                 <span className={styles.statusLabel}>Publish as:</span>
                 {(['draft', 'publish'] as const).map((s) => (
@@ -777,12 +945,11 @@ export default function Home() {
                 onClick={handleImport}
                 disabled={importing || !productName.trim() || selectedImages.size === 0}
               >
-                {importing ? (
-                  <><span className={styles.spinner} /> Importing…</>
-                ) : `Import ${selectedImages.size} image${selectedImages.size !== 1 ? 's' : ''} as ${productStatus === 'publish' ? 'Live' : 'Draft'}`}
+                {importing
+                  ? <><span className={styles.spinner} /> Importing…</>
+                  : `Import ${selectedImages.size} image${selectedImages.size !== 1 ? 's' : ''} as ${productStatus === 'publish' ? 'Live' : 'Draft'}`}
               </button>
 
-              {/* Log output */}
               {logs.length > 0 && (
                 <div className={styles.logBox} ref={logRef}>
                   {logs.map((log) => (
@@ -796,19 +963,33 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Success state */}
               {importDone && (
                 <div className={styles.successBox}>
                   <div className={styles.successTitle}>🎉 Product created!</div>
                   <p>
-                    The product has been created as a{' '}
-                    <strong>{importDone.status === 'publish' ? 'live product' : 'draft'}</strong> in WooCommerce.
+                    Created as a <strong>{importDone.status === 'publish' ? 'live product' : 'draft'}</strong>.
                     {importDone.status === 'draft' && ' Set your price and publish when ready.'}
-                    {importDone.variationsCreated > 0 && ` ${importDone.variationsCreated} variation(s) created — set prices per variation before publishing.`}
+                    {importDone.variationsCreated > 0 && ` ${importDone.variationsCreated} variation(s) created with price set.`}
                   </p>
-                  <a href={importDone.productUrl} target="_blank" rel="noopener noreferrer" className={styles.btnSuccess}>
-                    Open in WordPress →
-                  </a>
+                  <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+                    <a href={importDone.productUrl} target="_blank" rel="noopener noreferrer" className={styles.btnSuccess}>
+                      Open in WordPress →
+                    </a>
+                    {!isLastItem && (
+                      <button
+                        className={styles.btnNext}
+                        onClick={handleNext}
+                        disabled={scraping}
+                      >
+                        {scraping
+                          ? <><span className={styles.spinnerDark} /> Scraping next…</>
+                          : `Next Product → (${pendingAfterCurrent} remaining)`}
+                      </button>
+                    )}
+                    {isLastItem && queueTotal > 1 && (
+                      <span className={styles.allDoneBadge}>🏁 All products done!</span>
+                    )}
+                  </div>
                 </div>
               )}
             </section>

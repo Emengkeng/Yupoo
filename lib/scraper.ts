@@ -54,6 +54,80 @@ export function parseYupooUrl(raw: string): {
   }
 }
 
+/**
+ * Returns true if the filename (without extension) looks like a real full-res
+ * Yupoo image hash — e.g. "6910a181", "72352e99".
+ * Thumbnail variants like "small", "medium", "large", "thumb" return false.
+ */
+function isFullResUrl(imageUrl: string): boolean {
+  try {
+    const pathname = new URL(imageUrl).pathname;
+    const filename = pathname.split('/').pop() || '';
+    const nameWithoutExt = filename.replace(/\.[^.]+$/, '');
+    // A real hash is hex characters only, typically 6-12 chars
+    return /^[0-9a-f]{6,}$/i.test(nameWithoutExt);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract the photoId segment from a Yupoo CDN URL.
+ * URL pattern: https://photo.yupoo.com/{store}/{photoId}/{filename}
+ * Returns null if pattern doesn't match.
+ */
+function getPhotoId(imageUrl: string): string | null {
+  try {
+    const pathname = new URL(imageUrl).pathname;
+    // pathname = /{store}/{photoId}/{filename}
+    const parts = pathname.split('/').filter(Boolean);
+    if (parts.length >= 3) return parts[1]; // photoId is index 1
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deduplicate a list of Yupoo image URLs:
+ * 1. Group by photoId
+ * 2. Within each group, prefer full-res (hex hash filename) over thumbnails
+ * 3. If only thumbnails exist for a photoId, keep the first one as fallback
+ * 4. Preserve original order based on first appearance of each photoId
+ */
+function deduplicateImages(images: string[]): string[] {
+  // Map: photoId → { fullRes: string | null, fallback: string }
+  const groups = new Map<string, { fullRes: string | null; fallback: string }>();
+  // Track insertion order
+  const order: string[] = [];
+
+  for (const url of images) {
+    const photoId = getPhotoId(url);
+    if (!photoId) continue; // skip non-CDN URLs
+
+    if (!groups.has(photoId)) {
+      groups.set(photoId, { fullRes: null, fallback: url });
+      order.push(photoId);
+    }
+
+    const group = groups.get(photoId)!;
+    if (isFullResUrl(url)) {
+      // Prefer full-res; if multiple full-res exist, keep first
+      if (!group.fullRes) group.fullRes = url;
+    } else {
+      // Keep as fallback only if no fallback set yet
+      if (group.fallback === url) {
+        // already set on creation
+      }
+    }
+  }
+
+  return order.map((photoId) => {
+    const group = groups.get(photoId)!;
+    return group.fullRes ?? group.fallback;
+  });
+}
+
 let browserInstance: Browser | null = null;
 
 async function getBrowser(): Promise<Browser> {
@@ -80,7 +154,6 @@ async function scrapeAlbumPage(
   albumId: string,
   pageNum: number
 ): Promise<{ images: string[]; title: string; category: string | null; hasNextPage: boolean }> {
-  // Use ?tab=nor (detail view) — it renders all data-origin-src in the HTML
   const baseUrl = pageNum > 1 ? `${url}?page=${pageNum}&uid=1` : `${url}?uid=1`;
   const page = await browser.newPage();
 
@@ -95,13 +168,9 @@ async function scrapeAlbumPage(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
 
-    // networkidle2 ensures JS has run and lazy-loaded attrs are set
     await page.goto(baseUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-
-    // Wait for the image cards to appear
     await page.waitForSelector('.showalbum__children', { timeout: 20000 }).catch(() => {});
 
-    // Scroll to trigger any remaining lazy loaders
     await page.evaluate(async () => {
       await new Promise<void>((resolve) => {
         let totalHeight = 0;
@@ -120,44 +189,36 @@ async function scrapeAlbumPage(
     await new Promise((r) => setTimeout(r, 1500));
 
     const result = await page.evaluate((slug: string) => {
-      // ── Title ─────────────────────────────────────────────
       const titleEl =
         document.querySelector('.showalbumheader__gallerytitle') ||
         document.querySelector('h1') ||
         document.querySelector('title');
       const title = (titleEl?.textContent || '').trim().replace(/\s*[-|].*$/, '').trim();
 
-      // ── Category ──────────────────────────────────────────
-      // Look in the viewer info panel which reliably has the category link
       const catEl = document.querySelector('.viewer__catewrap a, .yupoo-viewer-cate-item a');
       const category = catEl ? (catEl.textContent || '').trim() : null;
 
-      // ── Images ────────────────────────────────────────────
       const seen = new Set<string>();
       const images: string[] = [];
 
       const pushIfValid = (src: string | null | undefined) => {
         if (!src) return;
         const s = src.trim();
-        if (!s) return;
-        if (s.startsWith('data:')) return;
-        // Filter out avatars / loading placeholders
+        if (!s || s.startsWith('data:')) return;
         if (s.includes('avatar') || s.includes('placeholder') || s.includes('loading')) return;
-        // Only Yupoo photo CDN
         if (!s.includes('photo.yupoo.com') && !s.includes('img.yupoo.com')) return;
         if (seen.has(s)) return;
         seen.add(s);
         images.push(s);
       };
 
-      // Primary: data-origin-src on every img inside album children
       document.querySelectorAll('.showalbum__children img').forEach((img) => {
+        // Prioritise data-origin-src (full-res lazy attr) first
         pushIfValid(img.getAttribute('data-origin-src'));
-        pushIfValid(img.getAttribute('data-src'));   // fallback: big.jpg variant
-        pushIfValid(img.getAttribute('src'));          // last resort
+        pushIfValid(img.getAttribute('data-src'));
+        pushIfValid(img.getAttribute('src'));
       });
 
-      // Fallback: all imgs on page if we got nothing
       if (images.length === 0) {
         document.querySelectorAll('img').forEach((img) => {
           pushIfValid(img.getAttribute('data-origin-src'));
@@ -166,7 +227,6 @@ async function scrapeAlbumPage(
         });
       }
 
-      // ── Pagination ────────────────────────────────────────
       const hasNextPage = !!document.querySelector(
         '.pagination .next:not(.disabled), a[rel="next"], .page-next:not([disabled])'
       );
@@ -174,7 +234,7 @@ async function scrapeAlbumPage(
       return { title, category, images, hasNextPage };
     }, storeSlug);
 
-    console.log(`Scraped page ${pageNum} of album ${albumId}: found ${result.images.length} images.`);
+    console.log(`Scraped page ${pageNum} of album ${albumId}: found ${result.images.length} images (before dedup).`);
 
     return result;
   } finally {
@@ -203,7 +263,6 @@ export async function scrapeAlbum(rawUrl: string): Promise<ScrapedAlbum> {
       category = result.category;
     }
 
-    // Deduplicate across pages
     for (const img of result.images) {
       if (!allImages.includes(img)) allImages.push(img);
     }
@@ -214,7 +273,14 @@ export async function scrapeAlbum(rawUrl: string): Promise<ScrapedAlbum> {
     await new Promise((r) => setTimeout(r, 800));
   }
 
-  if (allImages.length === 0) {
+  // Deduplicate: group by photoId, prefer full-res hex-hash filenames
+  const dedupedImages = deduplicateImages(allImages);
+  const removedCount = allImages.length - dedupedImages.length;
+  if (removedCount > 0) {
+    console.log(`[scraper] Removed ${removedCount} thumbnail/duplicate URLs, keeping ${dedupedImages.length} full-res images.`);
+  }
+
+  if (dedupedImages.length === 0) {
     throw new Error(
       'No images found. The album may be empty, private, or Yupoo is blocking access — try again in a minute.'
     );
@@ -226,7 +292,7 @@ export async function scrapeAlbum(rawUrl: string): Promise<ScrapedAlbum> {
     storeSlug,
     albumUrl: canonical,
     category,
-    images: allImages,
+    images: dedupedImages,
     totalPages: page,
   };
 }

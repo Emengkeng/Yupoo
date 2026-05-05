@@ -12,7 +12,7 @@ export const maxDuration = 300;
 
 export interface VariationInput {
   value: string;
-  imageUrl: string | null; // single representative image URL from album
+  imageUrl: string | null;
 }
 
 export interface ImportRequest {
@@ -61,7 +61,6 @@ export async function POST(req: NextRequest) {
         log(`${album.selectedImages.length} images to upload`);
 
         // ── 1. Collect all image URLs to fetch ─────────────────────
-        // For variable products, also fetch variation images if not already in selectedImages
         const allImageUrls = [...album.selectedImages];
         if (product.productType === 'variable') {
           for (const v of product.variations) {
@@ -78,7 +77,6 @@ export async function POST(req: NextRequest) {
           (done, total) => log(`Fetched ${done}/${total} images…`)
         );
 
-        // Build a map from original URL → upload result for easy lookup
         const resultByUrl = new Map(uploadResults.map((r) => [r.originalUrl, r]));
 
         const successful = uploadResults.filter((r) => r.buffer && r.contentType);
@@ -94,7 +92,6 @@ export async function POST(req: NextRequest) {
 
         // ── 3. Upload to WordPress Media Library ────────────────────
         log('Uploading to WordPress media library…');
-        // Map: originalUrl → WP attachment ID
         const wpIdByUrl = new Map<string, number>();
         let wpFailed = 0;
 
@@ -135,7 +132,6 @@ export async function POST(req: NextRequest) {
         const attributes = [];
 
         if (product.productType === 'variable' && product.variationAttribute && product.variations.length > 0) {
-          // The variation attribute — variation: true makes WC treat it as a variation axis
           attributes.push({
             name: product.variationAttribute,
             visible: true,
@@ -152,7 +148,6 @@ export async function POST(req: NextRequest) {
         }
 
         // ── 6. Build parent product image list ──────────────────────
-        // All successfully uploaded images (from selectedImages) go to the parent gallery
         const parentImages = album.selectedImages
           .map((url, position) => {
             const id = wpIdByUrl.get(url);
@@ -176,7 +171,9 @@ export async function POST(req: NextRequest) {
             { key: '_yupoo_album_url', value: album.albumUrl },
             { key: '_yupoo_store', value: album.storeSlug },
           ],
-          regular_price: product.regularPrice || undefined,
+          // For simple products, set price on the parent.
+          // For variable products, price is set per-variation below.
+          regular_price: product.productType === 'simple' ? (product.regularPrice || undefined) : undefined,
         });
 
         log(`✓ Parent product created! ID: ${created.id}`, 'success');
@@ -194,9 +191,11 @@ export async function POST(req: NextRequest) {
                 attributes: [{ name: product.variationAttribute, option: v.value }],
                 ...(imageId ? { image: { id: imageId } } : {}),
                 status: product.status,
+                // ✓ Price fix: set regular_price on every variation
+                regular_price: product.regularPrice || undefined,
               });
               variationsCreated++;
-              log(`  ✓ Variation "${v.value}"${imageId ? ` with image #${imageId}` : ''}`, 'success');
+              log(`  ✓ Variation "${v.value}"${imageId ? ` with image #${imageId}` : ''}${product.regularPrice ? ` @ ${product.regularPrice}` : ''}`, 'success');
             } catch (err) {
               log(`  ✗ Variation "${v.value}" failed: ${err instanceof Error ? err.message : err}`, 'warn');
             }
