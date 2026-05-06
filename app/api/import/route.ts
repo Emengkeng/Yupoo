@@ -1,5 +1,4 @@
 import { NextRequest } from 'next/server';
-import { uploadImagesFromYupoo } from '@/lib/uploadthing';
 import {
   getAllCategories,
   resolveCategoryPath,
@@ -58,9 +57,9 @@ export async function POST(req: NextRequest) {
 
         log(`Starting import for: ${product.name}`);
         log(`Type: ${product.productType} | Status: ${product.status}`);
-        log(`${album.selectedImages.length} images to upload`);
+        log(`${album.selectedImages.length} images to process`);
 
-        // ── 1. Collect all image URLs to fetch ─────────────────────
+        // ── 1. Collect all image URLs needed ───────────────────────
         const allImageUrls = [...album.selectedImages];
         if (product.productType === 'variable') {
           for (const v of product.variations) {
@@ -70,47 +69,62 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // ── 2. Fetch + upload to UploadThing ────────────────────────
-        log('Fetching images…');
         const referer = `https://${album.storeSlug}.x.yupoo.com`;
-        const uploadResults = await uploadImagesFromYupoo(allImageUrls, referer,
-          (done, total) => log(`Fetched ${done}/${total} images…`)
-        );
 
-        const resultByUrl = new Map(uploadResults.map((r) => [r.originalUrl, r]));
-
-        const successful = uploadResults.filter((r) => r.buffer && r.contentType);
-        const failed = uploadResults.filter((r) => !r.buffer);
-        if (failed.length > 0) {
-          log(`${failed.length} image(s) failed to fetch and will be skipped.`, 'warn');
-        }
-        if (successful.length === 0) throw new Error('All image fetches failed.');
-
-        const cacheHits = successful.filter((r) => r.fromCache).length;
-        if (cacheHits > 0) log(`⚡ ${cacheHits} image(s) reused from cache`, 'info');
-        log(`✓ ${successful.length} images ready`, 'success');
-
-        // ── 3. Upload to WordPress Media Library ────────────────────
-        log('Uploading to WordPress media library…');
+        // ── 2. Pipeline: fetch → WP upload → discard buffer ─────────
+        // Process one image at a time so only one buffer is in memory
+        // at any point. This keeps RAM usage flat regardless of album size.
+        log('Uploading images to WordPress…');
         const wpIdByUrl = new Map<string, number>();
+        let fetchFailed = 0;
         let wpFailed = 0;
 
-        for (const img of successful) {
+        for (let i = 0; i < allImageUrls.length; i++) {
+          const url = allImageUrls[i];
+          log(`  Image ${i + 1}/${allImageUrls.length}…`);
+
+          let buffer: ArrayBuffer | null = null;
+          let contentType: string | null = null;
+          let filename: string | null = null;
+
+          // Step A: fetch image
           try {
-            const mediaId = await uploadImageToWordPress(img.buffer!, img.contentType!, img.filename!);
-            wpIdByUrl.set(img.originalUrl, mediaId);
-            log(`  ✓ ${img.filename} → WP #${mediaId}`);
+            const fetched = await fetchImageForUpload(url, referer);
+            buffer = fetched.buffer;
+            contentType = fetched.contentType;
+            filename = fetched.filename;
+          } catch (err) {
+            fetchFailed++;
+            log(`  ✗ Fetch failed: ${err instanceof Error ? err.message : err}`, 'warn');
+            continue;
+          }
+
+          // Step B: upload directly to WordPress (skip UploadThing)
+          try {
+            const mediaId = await uploadImageToWordPress(buffer, contentType, filename);
+            wpIdByUrl.set(url, mediaId);
+            log(`  ✓ ${filename} → WP #${mediaId}`, 'success');
           } catch (err) {
             wpFailed++;
-            log(`  ✗ ${img.filename} WP upload failed: ${err instanceof Error ? err.message : err}`, 'warn');
+            log(`  ✗ WP upload failed for ${filename}: ${err instanceof Error ? err.message : err}`, 'warn');
+          } finally {
+            // Explicitly null the buffer so GC can reclaim it immediately
+            buffer = null;
+          }
+
+          // Small pause between images to avoid overwhelming WP
+          if (i < allImageUrls.length - 1) {
+            await new Promise((r) => setTimeout(r, 200));
           }
         }
 
-        if (wpIdByUrl.size === 0) throw new Error('All WordPress media uploads failed.');
-        if (wpFailed > 0) log(`${wpFailed} image(s) skipped due to WP upload errors.`, 'warn');
-        log(`✓ ${wpIdByUrl.size} images in WordPress media library`, 'success');
+        if (wpIdByUrl.size === 0) throw new Error('All image uploads failed.');
 
-        // ── 4. Resolve categories ───────────────────────────────────
+        const totalFailed = fetchFailed + wpFailed;
+        if (totalFailed > 0) log(`${totalFailed} image(s) skipped.`, 'warn');
+        log(`✓ ${wpIdByUrl.size} images in WordPress`, 'success');
+
+        // ── 3. Resolve categories ───────────────────────────────────
         const resolvedCategoryIds: number[] = [];
         const validPaths = product.categoryPaths.filter((p) => p.length > 0 && p[0]);
         if (validPaths.length > 0) {
@@ -128,7 +142,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // ── 5. Build attributes ─────────────────────────────────────
+        // ── 4. Build attributes ─────────────────────────────────────
         const attributes = [];
 
         if (product.productType === 'variable' && product.variationAttribute && product.variations.length > 0) {
@@ -147,7 +161,7 @@ export async function POST(req: NextRequest) {
           attributes.push({ name: 'Size', visible: true, variation: false, options: product.tshirtSizes });
         }
 
-        // ── 6. Build parent product image list ──────────────────────
+        // ── 5. Build parent product image list ──────────────────────
         const parentImages = album.selectedImages
           .map((url, position) => {
             const id = wpIdByUrl.get(url);
@@ -155,7 +169,7 @@ export async function POST(req: NextRequest) {
           })
           .filter((x): x is { id: number; position: number } => x !== null);
 
-        // ── 7. Create parent WooCommerce product ────────────────────
+        // ── 6. Create parent WooCommerce product ────────────────────
         log(`Creating ${product.productType} product in WooCommerce…`);
 
         const created = await createWcProduct({
@@ -171,14 +185,12 @@ export async function POST(req: NextRequest) {
             { key: '_yupoo_album_url', value: album.albumUrl },
             { key: '_yupoo_store', value: album.storeSlug },
           ],
-          // For simple products, set price on the parent.
-          // For variable products, price is set per-variation below.
           regular_price: product.productType === 'simple' ? (product.regularPrice || undefined) : undefined,
         });
 
-        log(`✓ Parent product created! ID: ${created.id}`, 'success');
+        log(`✓ Product created! ID: ${created.id}`, 'success');
 
-        // ── 8. Create variations (variable products only) ───────────
+        // ── 7. Create variations ────────────────────────────────────
         let variationsCreated = 0;
         if (product.productType === 'variable' && product.variations.length > 0) {
           log(`Creating ${product.variations.length} variation(s)…`);
@@ -191,25 +203,27 @@ export async function POST(req: NextRequest) {
                 attributes: [{ name: product.variationAttribute, option: v.value }],
                 ...(imageId ? { image: { id: imageId } } : {}),
                 status: product.status,
-                // ✓ Price fix: set regular_price on every variation
                 regular_price: product.regularPrice || undefined,
               });
               variationsCreated++;
-              log(`  ✓ Variation "${v.value}"${imageId ? ` with image #${imageId}` : ''}${product.regularPrice ? ` @ ${product.regularPrice}` : ''}`, 'success');
+              log(`  ✓ "${v.value}"${imageId ? ` → img #${imageId}` : ''}${product.regularPrice ? ` @ ${product.regularPrice}` : ''}`, 'success');
             } catch (err) {
-              log(`  ✗ Variation "${v.value}" failed: ${err instanceof Error ? err.message : err}`, 'warn');
+              log(`  ✗ "${v.value}" failed: ${err instanceof Error ? err.message : err}`, 'warn');
             }
           }
 
           log(`✓ ${variationsCreated}/${product.variations.length} variations created`, 'success');
         }
 
+        // ── 8. Send done event FIRST before any cleanup ─────────────
+        // This ensures the UI receives success even if the stream closes
+        // immediately after due to memory pressure or connection issues
         send(controller, {
           type: 'done',
           productId: created.id,
           productUrl: `${process.env.WC_URL}/wp-admin/post.php?post=${created.id}&action=edit`,
           uploadedImages: parentImages.length,
-          failedImages: failed.length + wpFailed,
+          failedImages: totalFailed,
           variationsCreated,
           status: product.status,
         });
@@ -231,6 +245,42 @@ export async function POST(req: NextRequest) {
       Connection: 'keep-alive',
     },
   });
+}
+
+// ── Fetch image for direct WP upload ───────────────────────────────────────
+// Replaces the two-step UploadThing → WP flow with a single fetch → WP step,
+// halving the number of buffers needed and eliminating UploadThing entirely
+// for the import pipeline.
+async function fetchImageForUpload(
+  imageUrl: string,
+  referer: string
+): Promise<{ buffer: ArrayBuffer; contentType: string; filename: string }> {
+  const response = await fetch(imageUrl, {
+    headers: {
+      Referer: referer,
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  let contentType = (response.headers.get('content-type') || 'image/jpeg').split(';')[0].trim();
+  if (contentType === 'image/jpg') contentType = 'image/jpeg';
+  if (!contentType.startsWith('image/')) contentType = 'image/jpeg';
+
+  const buffer = await response.arrayBuffer();
+
+  if (buffer.byteLength === 0) throw new Error('Empty response body');
+
+  const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+  const filename = `yupoo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+  return { buffer, contentType, filename };
 }
 
 function expandSneakerRange(raw: string): string[] {

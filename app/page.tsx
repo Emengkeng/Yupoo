@@ -15,13 +15,6 @@ interface ScrapedAlbum {
   totalPages: number;
 }
 
-interface WcCategory {
-  id: number;
-  name: string;
-  slug: string;
-  parent: number;
-}
-
 interface LogEntry {
   id: number;
   message: string;
@@ -97,6 +90,11 @@ export default function Home() {
     status: string;
     variationsCreated: number;
   } | null>(null);
+  // Tracks whether we got at least one success log — used for graceful
+  // disconnect recovery when stream closes before the done event arrives
+  const [hadSuccessLog, setHadSuccessLog] = useState(false);
+  const [streamDisconnected, setStreamDisconnected] = useState(false);
+
   const logRef = useRef<HTMLDivElement>(null);
   const logCounter = useRef(0);
 
@@ -109,8 +107,6 @@ export default function Home() {
   const [variations, setVariations] = useState<{ id: string; value: string; imageUrl: string | null }[]>([]);
   const [pickerOpenForId, setPickerOpenForId] = useState<string | null>(null);
   const [regularPrice, setRegularPrice] = useState('');
-
-  // Sneaker range for variable size
   const [varSneakerRange, setVarSneakerRange] = useState('');
 
   // Auto-scroll logs
@@ -120,6 +116,7 @@ export default function Home() {
 
   const addLog = useCallback((message: string, level: LogEntry['level'] = 'info') => {
     setLogs((prev) => [...prev, { id: ++logCounter.current, message, level, ts: Date.now() }]);
+    if (level === 'success') setHadSuccessLog(true);
   }, []);
 
   // ── Queue helpers ─────────────────────────────────────────────────────────
@@ -147,20 +144,6 @@ export default function Home() {
     setQueue((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
   }
 
-  // Captures current "carry-over" settings (everything except name, images, variations)
-  function captureSettings() {
-    return {
-      categoryPaths,
-      regularPrice,
-      sizeType,
-      sneakerRange,
-      tshirtSizes: new Set(tshirtSizes),
-      productType,
-      productStatus,
-      variationAttribute,
-    };
-  }
-
   async function scrapeIndex(index: number) {
     const item = queue[index];
     if (!item) return;
@@ -170,6 +153,8 @@ export default function Home() {
     setAlbum(null);
     setImportDone(null);
     setLogs([]);
+    setHadSuccessLog(false);
+    setStreamDisconnected(false);
     updateQueueStatus(index, { status: 'scraping' });
 
     try {
@@ -194,7 +179,6 @@ export default function Home() {
       setPickerOpenForId(null);
       setVarSneakerRange('');
 
-      // Prefill category from album if no category is set yet, otherwise keep existing
       if (categoryPaths.length === 0 && a.category) {
         setCategoryPaths([a.category.split('/').map((s) => s.trim()).filter(Boolean)]);
       }
@@ -210,20 +194,10 @@ export default function Home() {
     }
   }
 
-  async function startQueue() {
-    buildQueue();
-  }
-
-  // Called after a successful import — advance to next pending item
   async function handleNext() {
     if (currentIndex === null) return;
-    // Save current settings to carry over
-    // (state already reflects current values, nothing to do)
-
-    // Find next pending item
     const nextIndex = queue.findIndex((item, i) => i > currentIndex && item.status === 'pending');
-    if (nextIndex === -1) return; // no more items
-
+    if (nextIndex === -1) return;
     await scrapeIndex(nextIndex);
   }
 
@@ -335,6 +309,8 @@ export default function Home() {
     setImporting(true);
     setLogs([]);
     setImportDone(null);
+    setHadSuccessLog(false);
+    setStreamDisconnected(false);
 
     const payload = {
       album: {
@@ -357,6 +333,8 @@ export default function Home() {
         regularPrice,
       },
     };
+
+    let receivedDone = false;
 
     try {
       const res = await fetch('/api/import', {
@@ -385,6 +363,7 @@ export default function Home() {
             if (event.type === 'log') {
               addLog(event.message, event.level);
             } else if (event.type === 'done') {
+              receivedDone = true;
               setImportDone({
                 productId: event.productId,
                 productUrl: event.productUrl,
@@ -405,11 +384,17 @@ export default function Home() {
       }
     } catch (err) {
       addLog(err instanceof Error ? err.message : 'Import failed', 'error');
-      if (currentIndex !== null) {
-        updateQueueStatus(currentIndex, { status: 'failed' });
-      }
     } finally {
       setImporting(false);
+      // Stream closed — if we never got a done event but had success logs,
+      // the product likely created fine but the connection dropped before
+      // the final event arrived. Show a warning instead of silent failure.
+      if (!receivedDone) {
+        setStreamDisconnected(true);
+        if (currentIndex !== null) {
+          updateQueueStatus(currentIndex, { status: 'done', productName });
+        }
+      }
     }
   }
 
@@ -466,7 +451,7 @@ export default function Home() {
             <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
               <button
                 className={styles.btnPrimary}
-                onClick={startQueue}
+                onClick={buildQueue}
                 disabled={!queueInput.trim()}
               >
                 Start Queue ({queueInput.split('\n').filter((l) => l.trim()).length} URLs)
@@ -477,7 +462,6 @@ export default function Home() {
             </p>
           </section>
         ) : (
-          /* ── Queue status bar ── */
           <section className={styles.card}>
             <div className={styles.cardHead}>
               <span className={styles.stepNum}>01</span>
@@ -514,7 +498,6 @@ export default function Home() {
               ))}
             </div>
 
-            {/* Scrape first item if queue was just built and nothing is current */}
             {currentIndex === null && queue.length > 0 && (
               <button
                 className={styles.btnPrimary}
@@ -528,7 +511,6 @@ export default function Home() {
           </section>
         )}
 
-        {/* ── Scrape error ── */}
         {scrapeError && (
           <div className={styles.errorBox}>
             <span className={styles.errorIcon}>⚠</span>
@@ -687,12 +669,9 @@ export default function Home() {
                     />
                   </div>
 
-                  {/* Size quick-fill — shown when attribute looks like "Size" */}
                   {variationAttribute.trim().toLowerCase() === 'size' && (
                     <div className={styles.sizeQuickFill}>
                       <span className={styles.sizeQuickLabel}>Quick fill sizes:</span>
-
-                      {/* Sneaker range */}
                       <div className={styles.sizeQuickRow}>
                         <input
                           type="text"
@@ -712,8 +691,6 @@ export default function Home() {
                       {sneakerPreview(varSneakerRange) && (
                         <div className={styles.sizePreview}>{sneakerPreview(varSneakerRange)}</div>
                       )}
-
-                      {/* T-shirt sizes */}
                       <div className={styles.sizeQuickRow} style={{ marginTop: 8 }}>
                         <button className={styles.sizeQuickBtn} onClick={autoFillTshirtVariations}>
                           👕 Fill T-Shirt Sizes (XS → XXXL)
@@ -733,7 +710,6 @@ export default function Home() {
                           onChange={(e) => updateVariation(v.id, { value: e.target.value })}
                           placeholder="e.g. Red, 42, XL…"
                         />
-
                         <button
                           className={`${styles.varImgBtn} ${v.imageUrl ? styles.varImgBtnSet : ''}`}
                           onClick={() => setPickerOpenForId(pickerOpenForId === v.id ? null : v.id)}
@@ -747,7 +723,6 @@ export default function Home() {
                             />
                           ) : '🖼'}
                         </button>
-
                         <button className={styles.btnGhost} onClick={() => removeVariation(v.id)} title="Remove">✕</button>
 
                         {pickerOpenForId === v.id && (
@@ -963,6 +938,7 @@ export default function Home() {
                 </div>
               )}
 
+              {/* Clean success */}
               {importDone && (
                 <div className={styles.successBox}>
                   <div className={styles.successTitle}>🎉 Product created!</div>
@@ -976,18 +952,41 @@ export default function Home() {
                       Open in WordPress →
                     </a>
                     {!isLastItem && (
-                      <button
-                        className={styles.btnNext}
-                        onClick={handleNext}
-                        disabled={scraping}
-                      >
-                        {scraping
-                          ? <><span className={styles.spinnerDark} /> Scraping next…</>
-                          : `Next Product → (${pendingAfterCurrent} remaining)`}
+                      <button className={styles.btnNext} onClick={handleNext} disabled={scraping}>
+                        {scraping ? <><span className={styles.spinnerDark} /> Scraping…</> : `Next Product → (${pendingAfterCurrent} remaining)`}
                       </button>
                     )}
                     {isLastItem && queueTotal > 1 && (
                       <span className={styles.allDoneBadge}>🏁 All products done!</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Graceful disconnect — stream closed without done event */}
+              {!importDone && streamDisconnected && (
+                <div className={styles.warnBox}>
+                  <div className={styles.warnTitle}>
+                    {hadSuccessLog ? '⚠ Connection dropped — product likely created' : '⚠ Import may have failed'}
+                  </div>
+                  <p>
+                    {hadSuccessLog
+                      ? 'The server connection closed before confirming completion, but uploads were in progress. Check WordPress to verify the product was created.'
+                      : 'The connection dropped before any uploads completed. Check WordPress and retry if the product is missing.'}
+                  </p>
+                  <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+                    <a
+                      href={`${process.env.NEXT_PUBLIC_WC_URL ?? ''}/wp-admin/edit.php?post_type=product`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className={styles.btnSuccess}
+                    >
+                      Check WordPress →
+                    </a>
+                    {!isLastItem && (
+                      <button className={styles.btnNext} onClick={handleNext} disabled={scraping}>
+                        {scraping ? <><span className={styles.spinnerDark} /> Scraping…</> : `Next Product → (${pendingAfterCurrent} remaining)`}
+                      </button>
                     )}
                   </div>
                 </div>

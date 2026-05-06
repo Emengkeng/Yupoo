@@ -6,6 +6,9 @@
 
 Scrape any Yupoo album, review and edit product details, then import directly into WooCommerce as a draft product — with all images re-hosted on UploadThing CDN so they never break.
 
+> 🤖 **Vibecoded** — built entirely through conversational prompting with Claude. No manual coding.
+
+
 ## How it works
 
 1. Paste a Yupoo album URL → Puppeteer scrapes it (handles lazy-loading + pagination)
