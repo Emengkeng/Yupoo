@@ -190,6 +190,11 @@ export async function POST(req: NextRequest) {
 
         log(`✓ Product created! ID: ${created.id}`, 'success');
 
+        log(`DEBUG variations payload: ${JSON.stringify(product.variations)}`);
+        log(`DEBUG variationAttribute: "${product.variationAttribute}"`);
+        log(`DEBUG productType: "${product.productType}"`);
+        log(`DEBUG variations.length: ${product.variations.length}`);
+
         // ── 7. Create variations ────────────────────────────────────
         let variationsCreated = 0;
         if (product.productType === 'variable' && product.variations.length > 0) {
@@ -199,6 +204,9 @@ export async function POST(req: NextRequest) {
             if (!v.value.trim()) continue;
             try {
               const imageId = v.imageUrl ? wpIdByUrl.get(v.imageUrl) : undefined;
+              
+              log(`DEBUG creating variation: "${v.value}", imageId: ${imageId ?? 'none'}`);
+
               await createWcVariation(created.id, {
                 attributes: [{ name: product.variationAttribute, option: v.value }],
                 ...(imageId ? { image: { id: imageId } } : {}),
