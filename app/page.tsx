@@ -514,7 +514,32 @@ export default function Home() {
         {scrapeError && (
           <div className={styles.errorBox}>
             <span className={styles.errorIcon}>⚠</span>
-            <pre className={styles.errorText}>{scrapeError}</pre>
+            <div style={{ flex: 1 }}>
+              <pre className={styles.errorText}>{scrapeError}</pre>
+              {currentIndex !== null && (
+                <button
+                  className={styles.btnGhost}
+                  style={{ marginTop: 8 }}
+                  onClick={() => scrapeIndex(currentIndex)}
+                  disabled={scraping}
+                >
+                  {scraping ? 'Retrying…' : '↺ Retry this URL'}
+                </button>
+              )}
+              {(() => {
+                const nextPending = queue.findIndex((item, i) => i > (currentIndex ?? -1) && item.status === 'pending');
+                return nextPending !== -1 ? (
+                  <button
+                    className={styles.btnGhost}
+                    style={{ marginTop: 8, marginLeft: 8 }}
+                    onClick={() => scrapeIndex(nextPending)}
+                    disabled={scraping}
+                  >
+                    → Skip & go to next
+                  </button>
+                ) : null;
+              })()}
+            </div>
           </div>
         )}
 
