@@ -22,18 +22,18 @@ services:
   # Redis is already running as a separate Docker container on your VPS.
   # This service is commented out — connect to it via REDIS_URL in .env.
   # If you want to spin up a fresh dedicated Redis for this project, uncomment:
-  #
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: yupoo_redis
-  #   restart: unless-stopped
-  #   ports:
-  #     - '6380:6379'   # use 6380 to avoid conflict with existing Redis on 6379
-  #   healthcheck:
-  #     test: ['CMD', 'redis-cli', 'ping']
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
+  
+  redis:
+    image: redis:7-alpine
+    container_name: yupoo_redis
+    restart: unless-stopped
+    ports:
+      - '6380:6379'   # use 6380 to avoid conflict with existing Redis on 6379
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app:
     build:
