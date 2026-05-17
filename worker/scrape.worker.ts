@@ -4,7 +4,7 @@ import { updateJobStatus, saveScrapedAlbum } from '../lib/db';
 import { scrapeAlbum } from '../lib/scraper';
 import { translateTitle, generateDescription } from '../lib/ai';
 
-const CONCURRENCY = parseInt(process.env.SCRAPE_CONCURRENCY ?? '10', 10);
+const CONCURRENCY = parseInt(process.env.SCRAPE_CONCURRENCY ?? '5', 10);
 
 export function startScrapeWorker() {
   const worker = new Worker<ScrapeJobData>(

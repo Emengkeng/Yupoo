@@ -14,9 +14,9 @@ import {
   type WcCategory,
 } from '../lib/woocommerce';
 
-const CONCURRENCY = parseInt(process.env.IMPORT_CONCURRENCY ?? '15', 2);
-const IMAGE_UPLOAD_CONCURRENCY = parseInt(process.env.IMAGE_UPLOAD_CONCURRENCY ?? '15', 2);;
-const MAX_IMAGES_PER_PRODUCT = parseInt(process.env.MAX_IMAGES_PER_PRODUCT ?? '4', 4);
+const CONCURRENCY = parseInt(process.env.IMPORT_CONCURRENCY ?? '2', 10);
+const IMAGE_UPLOAD_CONCURRENCY = parseInt(process.env.IMAGE_UPLOAD_CONCURRENCY ?? '1', 10);
+const MAX_IMAGES_PER_PRODUCT = parseInt(process.env.MAX_IMAGES_PER_PRODUCT ?? '4', 10);
 
 async function fetchImageBuffer(
   imageUrl: string,
