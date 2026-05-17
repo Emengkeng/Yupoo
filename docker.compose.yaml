@@ -1,0 +1,77 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: yupoo_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-yupoo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yupoo_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-yupoo_importer}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-yupoo}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis is already running as a separate Docker container on your VPS.
+  # This service is commented out — connect to it via REDIS_URL in .env.
+  # If you want to spin up a fresh dedicated Redis for this project, uncomment:
+  #
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: yupoo_redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - '6380:6379'   # use 6380 to avoid conflict with existing Redis on 6379
+  #   healthcheck:
+  #     test: ['CMD', 'redis-cli', 'ping']
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: app
+    container_name: yupoo_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-yupoo}:${POSTGRES_PASSWORD:-yupoo_secret}@postgres:5432/${POSTGRES_DB:-yupoo_importer}
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: yupoo_worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-yupoo}:${POSTGRES_PASSWORD:-yupoo_secret}@postgres:5432/${POSTGRES_DB:-yupoo_importer}
+    # Workers need more shared memory for Puppeteer
+    shm_size: '2gb'
+    # Allow Puppeteer to run without --no-sandbox only if you trust the content.
+    # We keep --no-sandbox since we control the URLs.
+    cap_add:
+      - SYS_ADMIN
+
+volumes:
+  postgres_data:
