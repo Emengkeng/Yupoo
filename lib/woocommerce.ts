@@ -30,6 +30,41 @@ async function wcFetch(path: string, options: RequestInit = {}) {
   return res.json();
 }
 
+// ── Retry helper ──────────────────────────────────────────────────────────
+// Retries on 503 (server overloaded) and 429 (rate limited) with exponential
+// backoff. All other errors are rethrown immediately.
+
+const RETRYABLE = [429, 503];
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  retries = 4
+): Promise<T> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = parseInt(msg.match(/error (\d{3})/i)?.[1] ?? '0', 10);
+      const retryable = RETRYABLE.some((s) => msg.includes(String(s)));
+
+      if (retryable && attempt < retries) {
+        const delay = 1000 * Math.pow(2, attempt); // 2s, 4s, 8s
+        console.warn(
+          `[wp] ${label} | ${status || 'error'}, retrying in ${delay}ms (attempt ${attempt}/${retries})`
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      throw err;
+    }
+  }
+  // Unreachable but satisfies TypeScript
+  throw new Error(`${label}: all retries exhausted`);
+}
+
 export async function uploadImageToWordPress(
   imageBuffer: ArrayBuffer,
   contentType: string,
@@ -45,22 +80,28 @@ export async function uploadImageToWordPress(
   const url = `${WC_URL}/wp-json/wp/v2/media`;
   console.log(`[wp-media] Uploading ${filename} (${imageBuffer.byteLength} bytes)`);
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: wpAuth(),
-      'Content-Type': contentType,
-      'Content-Disposition': `attachment; filename="${filename}"`,
+  const media = await withRetry(
+    async () => {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: wpAuth(),
+          'Content-Type': contentType,
+          'Content-Disposition': `attachment; filename="${filename}"`,
+        },
+        body: imageBuffer,
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`WordPress media upload error ${res.status}: ${body}`);
+      }
+
+      return res.json();
     },
-    body: imageBuffer,
-  });
+    `upload ${filename}`
+  );
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`WordPress media upload error ${res.status}: ${body}`);
-  }
-
-  const media = await res.json();
   console.log(`[wp-media] ✓ Attachment ID ${media.id}`);
   return media.id as number;
 }
@@ -142,10 +183,13 @@ export interface CreateProductPayload {
 }
 
 export async function createWcProduct(payload: CreateProductPayload) {
-  return wcFetch('/products', {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+  return withRetry(
+    () => wcFetch('/products', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    `createWcProduct "${payload.name}"`
+  );
 }
 
 export interface CreateVariationPayload {
@@ -159,8 +203,11 @@ export async function createWcVariation(
   productId: number,
   payload: CreateVariationPayload
 ) {
-  return wcFetch(`/products/${productId}/variations`, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-  });
+  return withRetry(
+    () => wcFetch(`/products/${productId}/variations`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    `createWcVariation product ${productId}`
+  );
 }

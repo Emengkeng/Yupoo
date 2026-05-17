@@ -15,9 +15,7 @@ import {
 } from '../lib/woocommerce';
 
 const CONCURRENCY = parseInt(process.env.IMPORT_CONCURRENCY ?? '15', 10);
-// How many images to upload in parallel per product
 const IMAGE_UPLOAD_CONCURRENCY = 5;
-// Cap images per product — Yupoo albums can have 20+ but we only need a few
 const MAX_IMAGES_PER_PRODUCT = parseInt(process.env.MAX_IMAGES_PER_PRODUCT ?? '4', 10);
 
 async function fetchImageBuffer(
@@ -62,37 +60,56 @@ export function startImportWorker() {
       if (!album) throw new Error(`No scraped album found for job ${jobId}`);
 
       const referer = `https://${album.store_slug}.x.yupoo.com`;
-
-      // Slice to max — scraper stores all images but we only upload the first N
       const imagesToUpload = album.images.slice(0, MAX_IMAGES_PER_PRODUCT);
 
       // ── 2. Upload images to WordPress concurrently ────────────────────
       const limit = pLimit(IMAGE_UPLOAD_CONCURRENCY);
-      let uploaded = 0;
-      let failed = 0;
 
-      const wpImages: { id: number; position: number }[] = [];
+      // Stagger job starts to avoid synchronized bursts across concurrent jobs
+      await new Promise((r) => setTimeout(r, Math.random() * 2000));
 
-      await Promise.all(
-        imagesToUpload.map((url, position) =>
-          limit(async () => {
-            try {
-              const { buffer, contentType, filename } = await fetchImageBuffer(url, referer);
-              const mediaId = await uploadImageToWordPress(buffer, contentType, filename);
-              wpImages.push({ id: mediaId, position });
-              uploaded++;
-            } catch (err) {
-              failed++;
+      async function uploadWithRetry(
+        url: string,
+        position: number,
+        retries = 3
+      ): Promise<{ id: number; position: number } | null> {
+        for (let attempt = 1; attempt <= retries; attempt++) {
+          try {
+            const { buffer, contentType, filename } = await fetchImageBuffer(url, referer);
+            const mediaId = await uploadImageToWordPress(buffer, contentType, filename);
+            return { id: mediaId, position };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const is503 = msg.includes('503');
+            if (is503 && attempt < retries) {
+              const delay = 1000 * Math.pow(2, attempt);
               console.warn(
-                `[import] job ${jobId} | image ${position + 1} failed: ${err instanceof Error ? err.message : err}`
+                `[import] job ${jobId} | image ${position + 1} | 503, retrying in ${delay}ms (attempt ${attempt}/${retries})`
               );
+              await new Promise((r) => setTimeout(r, delay));
+              continue;
             }
-          })
+            console.warn(
+              `[import] job ${jobId} | image ${position + 1} failed: ${msg}`
+            );
+            return null;
+          }
+        }
+        return null;
+      }
+
+      const results = await Promise.all(
+        imagesToUpload.map((url, position) =>
+          limit(() => uploadWithRetry(url, position))
         )
       );
 
-      // Sort by original position so gallery order is preserved
-      wpImages.sort((a, b) => a.position - b.position);
+      const wpImages = results
+        .filter((r): r is { id: number; position: number } => r !== null)
+        .sort((a, b) => a.position - b.position);
+
+      const uploaded = wpImages.length;
+      const failed = imagesToUpload.length - uploaded;
 
       if (wpImages.length === 0) {
         throw new Error('All image uploads failed — aborting product creation');
