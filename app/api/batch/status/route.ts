@@ -20,8 +20,8 @@ export async function GET(req: NextRequest) {
     if (jobIds.length > 0) {
       const [albums, products] = await Promise.all([
         db.query(
-          `SELECT job_id, translated_name, album_id, store_slug, array_length(images, 1) AS image_count
-           FROM scraped_albums WHERE job_id = ANY($1)`,
+          `SELECT job_id, translated_name, album_id, store_slug, jsonb_array_length(images) AS image_count
+            FROM scraped_albums WHERE job_id = ANY($1)`,
           [jobIds]
         ),
         db.query(
