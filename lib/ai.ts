@@ -2,10 +2,6 @@ const XAI_API = 'https://api.x.ai/v1/chat/completions';
 const MODEL = 'grok-3-fast-beta';
 
 // ── Brand abbreviation lookup ─────────────────────────────────────────────
-// Expands shorthand used by Yupoo sellers before passing to the AI.
-// Keys are lowercase, matched case-insensitively against whole words.
-// Add new entries here as you encounter them.
-
 const BRAND_ABBREVIATIONS: Record<string, string> = {
   'lv':    'Louis Vuitton',
   'bv':    'Bottega Veneta',
@@ -38,9 +34,6 @@ const BRAND_ABBREVIATIONS: Record<string, string> = {
 };
 
 // ── Chinese brand name lookup ─────────────────────────────────────────────
-// Common Chinese brand names found in Yupoo supplier catalogs.
-// Applied before AI translation to reduce API costs and improve consistency.
-
 export const CHINESE_BRAND_NAMES: Record<string, string> = {
   '普拉达':   'Prada',
   '古奇':    'Gucci',
@@ -66,15 +59,12 @@ export const CHINESE_BRAND_NAMES: Record<string, string> = {
   '葆蝶家':   'Bottega Veneta',
   '宝缇嘉':   'Bottega Veneta',
   '克里斯汀迪奥': 'Christian Dior',
-  '华伦天努':  'Valentino',   // alternate spelling seen in listings
+  '华伦天努':  'Valentino',
 };
 
 // ── Chinese product-grade / listing tags ──────────────────────────────────
-// Tokens that describe product grade or type in Yupoo listings.
-// Replaced with their English equivalents before further processing.
-
 export const CHINESE_PRODUCT_TAGS: Record<string, string> = {
-  '原单': 'Original',   // "first copy" / AAA grade
+  '原单': 'Original',
   '高仿': 'Replica',
   '正品': 'Authentic',
   '定制': 'Custom',
@@ -82,11 +72,6 @@ export const CHINESE_PRODUCT_TAGS: Record<string, string> = {
 };
 
 // ── Helper: expand Chinese brands and product tags ────────────────────────
-
-/**
- * Replace known Chinese brand names and product-grade tags with English.
- * Operates on exact substring matches (no word-boundary needed for CJK).
- */
 export function expandChineseBrands(name: string): string {
   let result = name;
 
@@ -98,9 +83,7 @@ export function expandChineseBrands(name: string): string {
   }
 
   for (const [tag, label] of Object.entries(CHINESE_PRODUCT_TAGS)) {
-    // "原单1BH082" → "Original 1BH082"
     result = result.replace(new RegExp(`${tag}([\\w])`, 'g'), `${label} $1`);
-    // "原单 1BH082" → "Original 1BH082" (tag with existing space)
     result = result.replace(tag, label);
   }
 
@@ -108,17 +91,6 @@ export function expandChineseBrands(name: string): string {
 }
 
 // ── Helper: normalize reversed "CODE Brand" titles ────────────────────────
-
-/**
- * Yupoo sellers sometimes list products as "CODE BrandName" instead of
- * "BrandName CODE". Detect and flip so brand always comes first.
- * Only flips when the very first token is purely numeric.
- *
- * "7061 万宝龙"   → "万宝龙 7061"   (expandChineseBrands handles it next)
- * "7186 LV"      → "LV 7186"       (expandAbbreviations handles it next)
- * "BV 855182"    → unchanged        (BV is not numeric)
- * "普拉达 1BH082" → unchanged        (brand already first)
- */
 export function normalizeTokenOrder(name: string): string {
   const match = name.match(/^(\d+)\s+(.+)$/);
   if (match) {
@@ -128,33 +100,15 @@ export function normalizeTokenOrder(name: string): string {
 }
 
 // ── Helper: expand Latin brand abbreviations ──────────────────────────────
-
-/**
- * Expand brand abbreviations in a product name.
- * Handles three cases:
- *  1. Standard Latin word boundary:   "lv bag"  → "Louis Vuitton bag"
- *  2. Abbreviation adjacent to CJK:   "BV包"    → "Bottega Veneta包"
- *  3. Abbreviation before a code:     "BV843893" → "Bottega Veneta843893"
- *
- * Uses lookbehind/lookahead (requires Node.js 10+ / V8 6.3+).
- * Falls back to capture-group approach for broader compatibility if needed.
- */
 export function expandAbbreviations(name: string): string {
   let result = name;
 
   for (const [abbr, full] of Object.entries(BRAND_ABBREVIATIONS)) {
     const escaped = abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-    // Matches abbr when surrounded by:
-    // - start / end of string
-    // - whitespace
-    // - CJK character [\u4e00-\u9fff\u3400-\u4dbf]
-    // - digit (so "BV843893" also expands)
     const pattern =
       `(?<=[\\s\\u4e00-\\u9fff\\u3400-\\u4dbf]|^)` +
       `(${escaped})` +
       `(?=[\\s\\u4e00-\\u9fff\\u3400-\\u4dbf\\d]|$)`;
-
     const re = new RegExp(pattern, 'gi');
     result = result.replace(re, full);
   }
@@ -163,16 +117,6 @@ export function expandAbbreviations(name: string): string {
 }
 
 // ── Master pre-processor ──────────────────────────────────────────────────
-
-/**
- * Run all local normalization steps on a raw Yupoo product title before
- * any AI call. Order matters:
- *   1. normalizeTokenOrder  — flip "7061 万宝龙" → "万宝龙 7061"
- *   2. expandChineseBrands  — "万宝龙" → "Montblanc", "原单" → "Original"
- *   3. expandAbbreviations  — "BV" → "Bottega Veneta", "LV" → "Louis Vuitton"
- *
- * Many common titles will be fully resolved here with zero API cost.
- */
 export function preprocessTitle(raw: string): string {
   let title = raw.trim();
   title = normalizeTokenOrder(title);
@@ -181,64 +125,58 @@ export function preprocessTitle(raw: string): string {
   return title;
 }
 
-// ── Grok API call ─────────────────────────────────────────────────────────
+// ── Grok API call with 429 retry ──────────────────────────────────────────
+async function grokText(prompt: string, retries = 4): Promise<string> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const res = await fetch(XAI_API, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.XAI_API_KEY!}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
 
-async function grokText(prompt: string): Promise<string> {
-  const res = await fetch(XAI_API, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.XAI_API_KEY!}`,
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 300,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
+    if (res.status === 429 && attempt < retries) {
+      const delay = 1000 * Math.pow(2, attempt); // 2s, 4s, 8s
+      console.warn(`[ai] 429 rate limited, retrying in ${delay}ms (attempt ${attempt}/${retries})`);
+      await new Promise((r) => setTimeout(r, delay));
+      continue;
+    }
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`xAI API error ${res.status}: ${body}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`xAI API error ${res.status}: ${body}`);
+    }
+
+    const data = await res.json();
+    return (data.choices?.[0]?.message?.content ?? '').trim();
   }
 
-  const data = await res.json();
-  return (data.choices?.[0]?.message?.content ?? '').trim();
+  throw new Error('xAI API: all retries exhausted');
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────
 
 /**
  * Normalize and translate a single product title.
- *
- * Pipeline:
- *   1. preprocessTitle()   — local normalization (no API cost)
- *   2. If significant CJK remains → AI translation
- *   3. expandAbbreviations() on the AI result (catches any abbrs in translation)
- *
- * Examples (no API call needed):
- *   "普拉达 原单1BH082"  → "Prada Original 1BH082"
- *   "7061 万宝龙"       → "Montblanc 7061"
- *   "BV 855182"        → "Bottega Veneta 855182"
- *   "7186 LV"          → "Louis Vuitton 7186"
+ * Uses local preprocessing first — AI only called if significant CJK remains.
  */
 export async function translateTitle(title: string): Promise<string> {
-  // Step 1 — local normalization (free, instant)
   const preprocessed = preprocessTitle(title);
 
-  // Step 2 — check if significant CJK remains
   const cjk = (preprocessed.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
-
   if (cjk > 0 && cjk / preprocessed.length >= 0.3) {
-    // Still has substantial CJK — hand off to AI
     const translated = await grokText(
       `Translate this product title to English. Reply with only the translated title, nothing else.\n\n"${preprocessed}"`
     );
-    // Run abbreviation expansion on the AI output too
     return expandAbbreviations(translated || preprocessed);
   }
 
-  // Already clean — no API call needed
   return preprocessed;
 }
 
@@ -261,17 +199,14 @@ Reply with only the description, no quotes, no labels.`
 
 /**
  * Batch: translate + generate descriptions for multiple products in one API call.
- * Returns array in same order as input.
- *
- * All titles are pre-processed locally before being sent to the AI,
- * which reduces token usage and improves translation accuracy.
+ * Preferred over calling translateTitle + generateDescription separately —
+ * one API call instead of two per product, halving rate limit pressure.
  */
 export async function batchEnrich(
   products: { name: string; categoryPath: string[] }[]
 ): Promise<{ translatedName: string; description: string }[]> {
   if (products.length === 0) return [];
 
-  // Pre-process all titles locally before sending to AI
   const preprocessed = products.map((p) => ({
     ...p,
     name: preprocessTitle(p.name),
@@ -300,7 +235,6 @@ Reply with ONLY a valid JSON array, no markdown, no explanation. Example:
     const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     const parsed = JSON.parse(clean) as { translatedName: string; description: string }[];
     if (Array.isArray(parsed) && parsed.length === preprocessed.length) {
-      // Run abbreviation expansion on AI-returned names too
       return parsed.map((item) => ({
         ...item,
         translatedName: expandAbbreviations(item.translatedName),
