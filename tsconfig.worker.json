@@ -11,12 +11,12 @@
     "paths": { "@/*": ["./*"] }
   },
   "include": [
-    "src/worker/**/*",
-    "src/lib/db.ts",
-    "src/lib/queues.ts",
-    "src/lib/ai.ts",
-    "src/lib/scraper.ts",
-    "src/lib/woocommerce.ts"
+    "worker/**/*",
+    "lib/db.ts",
+    "lib/queues.ts",
+    "lib/ai.ts",
+    "lib/scraper.ts",
+    "lib/woocommerce.ts"
   ],
-  "exclude": ["node_modules", "src/app", ".next"]
+  "exclude": ["node_modules", "app", ".next"]
 }
