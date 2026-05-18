@@ -155,7 +155,6 @@ export default function BatchPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jobIds: ids }),
       });
-      const data = await res.json();
       if (res.ok) {
         setSelectedIds(new Set());
         await fetchStatus();
@@ -231,9 +230,12 @@ export default function BatchPage() {
             <code>URL | Name | Category/Sub | Price</code>
             <span className={styles.sep}>·</span>
             <code>URL | Category/Sub | Price</code>
+            <span className={styles.sep}>·</span>
+            <code>URL | Cat1/Sub;Cat2/Sub</code>
           </div>
           <div className={styles.formatRules}>
             <span>Field 2 is auto-detected: <strong>contains /</strong> → category, <strong>no /</strong> → name.</span>
+            <span>Separate multiple categories with <strong>;</strong> e.g. <code>Men/Sneakers/Nike;Sale/Footwear</code> — product is assigned to all of them.</span>
             <span>Name and description are AI-generated when omitted.</span>
           </div>
 
@@ -246,7 +248,8 @@ export default function BatchPage() {
               `https://store.x.yupoo.com/albums/789012 | Boots\n` +
               `https://store.x.yupoo.com/albums/345678 | Men/Sneakers/Nike\n` +
               `https://store.x.yupoo.com/albums/901234 | Men/Sneakers/Nike | 89.99\n` +
-              `https://store.x.yupoo.com/albums/111111 | Air Max 90 | Men/Sneakers/Nike | 120.00`
+              `https://store.x.yupoo.com/albums/111111 | Air Max 90 | Men/Sneakers/Nike | 120.00\n` +
+              `https://store.x.yupoo.com/albums/222222 | Men/Sneakers/Nike;Sale/Footwear | 75.00`
             }
             rows={8}
             spellCheck={false}
@@ -395,6 +398,13 @@ export default function BatchPage() {
                         <div className={styles.nameSub}>
                           {job.url.replace('https://', '').slice(0, 60)}
                         </div>
+                        {job.raw_category && (
+                          <div className={styles.categoryTags}>
+                            {job.raw_category.split(';').map((cat, i) => (
+                              <span key={i} className={styles.categoryTag}>{cat.trim()}</span>
+                            ))}
+                          </div>
+                        )}
                         {job.error && (
                           <div className={styles.errorText}>{job.error}</div>
                         )}

@@ -89,9 +89,7 @@ export function startImportWorker() {
               await new Promise((r) => setTimeout(r, delay));
               continue;
             }
-            console.warn(
-              `[import] job ${jobId} | image ${position + 1} failed: ${msg}`
-            );
+            console.warn(`[import] job ${jobId} | image ${position + 1} failed: ${msg}`);
             return null;
           }
         }
@@ -118,18 +116,45 @@ export function startImportWorker() {
       console.log(`[import] job ${jobId} | ${uploaded} images uploaded, ${failed} failed`);
 
       // ── 3. Resolve categories ─────────────────────────────────────────
+      //
+      // album.category_paths is an array of paths, e.g.:
+      //   [["Men","Sneakers","Nike"], ["Sale","Footwear"]]
+      //
+      // For each path we walk the WooCommerce category tree, creating nodes
+      // that don't exist yet, and collect the leaf node ID.
+      // Duplicate leaf IDs are deduplicated before attaching to the product.
+      //
+      // getAllCategories() is called once up-front; the result is threaded
+      // through each resolveCategoryPath call so newly-created categories are
+      // visible to subsequent paths without extra DB round-trips.
       const resolvedCategoryIds: number[] = [];
-      if (album.category_path.length > 0) {
+
+      if (album.category_paths.length > 0) {
         let existingCats: WcCategory[] = await getAllCategories();
-        try {
-          const { id, cats } = await resolveCategoryPath(album.category_path, existingCats);
-          existingCats = cats;
-          resolvedCategoryIds.push(id);
-        } catch (err) {
-          console.warn(
-            `[import] job ${jobId} | category resolve failed: ${err instanceof Error ? err.message : err}`
-          );
+
+        for (const path of album.category_paths) {
+          if (path.length === 0) continue;
+          try {
+            const { id, cats } = await resolveCategoryPath(path, existingCats);
+            // Thread updated category list to the next iteration so newly
+            // created categories are found locally instead of hitting the API.
+            existingCats = cats;
+            if (!resolvedCategoryIds.includes(id)) {
+              resolvedCategoryIds.push(id);
+            }
+          } catch (err) {
+            console.warn(
+              `[import] job ${jobId} | category resolve failed for [${path.join('/')}]: ` +
+              (err instanceof Error ? err.message : String(err))
+            );
+          }
         }
+
+        console.log(
+          `[import] job ${jobId} | resolved ${resolvedCategoryIds.length} ` +
+          `categor${resolvedCategoryIds.length === 1 ? 'y' : 'ies'}: ` +
+          `[${resolvedCategoryIds.join(', ')}]`
+        );
       }
 
       // ── 4. Create WooCommerce product ─────────────────────────────────
@@ -138,15 +163,16 @@ export function startImportWorker() {
         type: 'simple',
         description: album.description || '',
         status: 'publish',
+        // WooCommerce accepts an array — each entry is { id: number }
         categories: resolvedCategoryIds.map((id) => ({ id })),
         images: wpImages,
         attributes: [],
         regular_price: rawPrice || undefined,
         meta_data: [
-          { key: '_yupoo_album_id', value: album.album_id },
+          { key: '_yupoo_album_id',  value: album.album_id },
           { key: '_yupoo_album_url', value: album.album_url },
-          { key: '_yupoo_store', value: album.store_slug },
-          { key: '_import_job_id', value: String(jobId) },
+          { key: '_yupoo_store',     value: album.store_slug },
+          { key: '_import_job_id',   value: String(jobId) },
         ],
       });
 

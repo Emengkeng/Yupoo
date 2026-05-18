@@ -1,10 +1,31 @@
 import { Worker, Job } from 'bullmq';
-import { getRedis, getScrapeQueue, getImportQueue, SCRAPE_QUEUE, type ScrapeJobData } from '../lib/queues';
+import { getRedis, getImportQueue, SCRAPE_QUEUE, type ScrapeJobData } from '../lib/queues';
 import { updateJobStatus, saveScrapedAlbum } from '../lib/db';
 import { scrapeAlbum } from '../lib/scraper';
 import { translateTitle, generateDescription } from '../lib/ai';
 
 const CONCURRENCY = parseInt(process.env.SCRAPE_CONCURRENCY ?? '5', 10);
+
+/**
+ * Parse a raw category string into an array of category paths.
+ *
+ * A single path:   "Men/Sneakers/Nike"         → [["Men","Sneakers","Nike"]]
+ * Multiple paths:  "Men/Sneakers/Nike;Sale/Footwear"
+ *                                              → [["Men","Sneakers","Nike"],["Sale","Footwear"]]
+ *
+ * Blank segments and blank paths are dropped.
+ */
+function parseCategoryPaths(raw: string): string[][] {
+  return raw
+    .split(';')
+    .map((path) =>
+      path
+        .split('/')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    )
+    .filter((path) => path.length > 0);
+}
 
 export function startScrapeWorker() {
   const worker = new Worker<ScrapeJobData>(
@@ -27,23 +48,27 @@ export function startScrapeWorker() {
         productName = await translateTitle(album.title || `Product ${album.albumId}`);
       }
 
-      // ── 3. Resolve category path ──────────────────────────────────────
+      // ── 3. Resolve category paths ─────────────────────────────────────
       // Priority: user-supplied rawCategory > scraped category > empty
-      let categoryPath: string[] = [];
+      //
+      // rawCategory may contain multiple paths separated by ';':
+      //   "Men/Sneakers/Nike;Sale/Footwear"
+      //
+      // The scraped album.category is always a single path string, so we
+      // normalise it to the same shape for consistency.
+      let categoryPaths: string[][] = [];
+
       if (rawCategory?.trim()) {
-        categoryPath = rawCategory
-          .split('/')
-          .map((s) => s.trim())
-          .filter(Boolean);
-      } else if (album.category) {
-        categoryPath = album.category
-          .split('/')
-          .map((s) => s.trim())
-          .filter(Boolean);
+        categoryPaths = parseCategoryPaths(rawCategory.trim());
+      } else if (album.category?.trim()) {
+        categoryPaths = parseCategoryPaths(album.category.trim());
       }
 
       // ── 4. Generate description ───────────────────────────────────────
-      const description = await generateDescription(productName, categoryPath);
+      // Pass the first category path to the description generator (used as
+      // context only — the product can still be in multiple WC categories).
+      const primaryPath = categoryPaths[0] ?? [];
+      const description = await generateDescription(productName, primaryPath);
 
       // ── 5. Save to DB ─────────────────────────────────────────────────
       await saveScrapedAlbum({
@@ -54,13 +79,18 @@ export function startScrapeWorker() {
         raw_title: album.title,
         translated_name: productName,
         description,
-        category_path: categoryPath,
+        category_paths: categoryPaths,   // e.g. [["Men","Sneakers","Nike"],["Sale","Footwear"]]
         images: album.images,
         total_pages: album.totalPages,
       });
 
       await updateJobStatus(jobId, 'scraped');
-      console.log(`[scrape] ✓ job ${jobId} | "${productName}" | ${album.images.length} images`);
+      console.log(
+        `[scrape] ✓ job ${jobId} | "${productName}" | ${album.images.length} images` +
+        (categoryPaths.length > 0
+          ? ` | ${categoryPaths.length} categor${categoryPaths.length === 1 ? 'y' : 'ies'}`
+          : '')
+      );
 
       // ── 6. Enqueue import job ─────────────────────────────────────────
       const importQueue = getImportQueue();

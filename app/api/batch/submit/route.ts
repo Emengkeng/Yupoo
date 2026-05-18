@@ -10,6 +10,39 @@ interface ParsedLine {
   rawPrice: string | null;
 }
 
+/**
+ * Determines whether a field value looks like a category path.
+ *
+ * A field is treated as a category if it contains '/' (path separator) or ';'
+ * (multiple-path separator). A plain name like "Boots" contains neither.
+ */
+function looksLikeCategory(value: string): boolean {
+  return value.includes('/') || value.includes(';');
+}
+
+/**
+ * Parse one input line into its structured fields.
+ *
+ * Supported formats (| is the field separator):
+ *
+ *   URL
+ *   URL | Name
+ *   URL | Category/Sub
+ *   URL | Category/Sub | Price
+ *   URL | Name | Category/Sub
+ *   URL | Name | Category/Sub | Price
+ *   URL | Category/Sub | Price
+ *
+ * Multiple categories (semicolon-separated paths):
+ *   URL | Men/Sneakers/Nike;Sale/Footwear
+ *   URL | Name | Men/Sneakers/Nike;Sale/Footwear | Price
+ *
+ * Field 2 auto-detection:
+ *   - contains '/' or ';'  → category
+ *   - otherwise            → name
+ *
+ * Price must be a valid number; it is always the last pipe field when present.
+ */
 function parseLine(line: string): ParsedLine | null {
   const parts = line.split('|').map((p) => p.trim());
   const rawUrl = parts[0];
@@ -18,23 +51,36 @@ function parseLine(line: string): ParsedLine | null {
   const parsed = parseYupooUrl(rawUrl);
   if (!parsed) return null;
 
-  const rawPrice = parts[3] ? parts[3].trim()
-    : parts[2] && !isNaN(parseFloat(parts[2])) && !parts[2].includes('/') ? parts[2].trim()
-    : null;
+  // Detect price: last field is numeric (and not a category path)
+  const lastField = parts[parts.length - 1];
+  const lastIsPrice =
+    parts.length > 1 &&
+    !isNaN(parseFloat(lastField)) &&
+    !looksLikeCategory(lastField);
 
+  const rawPrice = lastIsPrice ? lastField : null;
   if (rawPrice && isNaN(parseFloat(rawPrice))) return null;
 
-  // If parts[1] contains '/' treat it as category, otherwise as name
+  // Remaining fields between URL and optional price
+  const middleEnd = lastIsPrice ? parts.length - 1 : parts.length;
+  const middle = parts.slice(1, middleEnd);
+
   let rawName: string | null = null;
   let rawCategory: string | null = null;
 
-  if (parts[1]) {
-    if (parts[1].includes('/')) {
-      rawCategory = parts[1];
+  if (middle.length === 0) {
+    // URL only
+  } else if (middle.length === 1) {
+    // Single middle field — detect by content
+    if (looksLikeCategory(middle[0])) {
+      rawCategory = middle[0];
     } else {
-      rawName = parts[1];
-      rawCategory = parts[2] && !parts[2].match(/^\d+(\.\d+)?$/) ? parts[2] : null;
+      rawName = middle[0];
     }
+  } else {
+    // Two or more middle fields — first is name, second is category
+    rawName = middle[0] || null;
+    rawCategory = middle[1] || null;
   }
 
   return { url: parsed.canonical, rawName, rawCategory, rawPrice };
@@ -82,13 +128,13 @@ export async function POST(req: NextRequest) {
     // Enqueue scrape jobs
     const scrapeQueue = getScrapeQueue();
     await scrapeQueue.addBulk(
-      jobs.map((job, i) => ({
+      jobs.map((job) => ({
         name: `scrape:${job.id}`,
         data: {
           jobId: job.id,
           url: job.url,
           rawName: job.raw_name,
-          rawCategory: job.raw_category,
+          rawCategory: job.raw_category,   // may contain ';' for multiple paths
           rawPrice: job.raw_price,
         },
       }))
