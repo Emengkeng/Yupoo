@@ -224,12 +224,26 @@ export function preprocessTitle(raw: string): string {
   let title = raw.trim();
   title = stripTitleNoise(title);       // Yupoo + platform/quality noise stripped first
   title = normalizeTokenOrder(title);
+  title = stripRedundantChineseBrands(title);
   title = expandChineseBrands(title);
   title = deduplicateBrandNames(title); // remove redundant abbreviations after expansion
   title = expandAbbreviations(title);
   title = deduplicateRepeatedPhrases(title);
   title = stripYupooFromTitle(title);   // final safety pass — belt-and-suspenders
   return title;
+}
+
+function stripRedundantChineseBrands(name: string): string {
+  let result = name;
+  for (const [chinese, english] of Object.entries(CHINESE_BRAND_NAMES)) {
+    if (
+      result.includes(chinese) &&
+      result.toLowerCase().includes(english.toLowerCase())
+    ) {
+      result = result.replace(chinese, '');
+    }
+  }
+  return result.replace(/\s{2,}/g, ' ').trim();
 }
 
 function deduplicateRepeatedPhrases(name: string): string {

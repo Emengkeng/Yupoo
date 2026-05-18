@@ -45,7 +45,7 @@ function parseSizes(raw: string): string[] {
     if (!isNaN(lo) && !isNaN(hi) && lo <= hi && hi - lo <= 20) {
       const sizes: string[] = [];
       // Only step by 0.5 if either bound explicitly contains a decimal
-      const step = (rangeMatch[1].includes('.') || rangeMatch[3].includes('.')) ? 0.5 : 1;
+      const step = (rangeMatch[1].includes('.') || rangeMatch[2].includes('.')) ? 0.5 : 1;
       for (let s = lo; s <= hi + 0.001; s += step) {
         const rounded = Math.round(s * 2) / 2;
         sizes.push(rounded % 1 === 0 ? String(rounded) : rounded.toFixed(1));
