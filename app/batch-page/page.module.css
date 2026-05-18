@@ -405,6 +405,39 @@
 
 .statusIcon { font-size: 0.6rem; }
 
+/* ── Sizes column ── */
+.tdSizes {
+  white-space: nowrap;
+}
+
+.sizeBadge {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.68rem;
+  color: var(--yellow);
+  background: var(--yellow-dim);
+  border: 1px solid rgba(245,200,66,.25);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+/* ── WC cell with variations badge ── */
+.wcCell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.variationsBadge {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.62rem;
+  color: var(--green);
+  background: var(--green-dim);
+  border: 1px solid rgba(62,207,142,.25);
+  border-radius: 3px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
 .tdImages {
   font-family: 'DM Mono', monospace;
   font-size: 0.72rem;

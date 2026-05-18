@@ -2,7 +2,7 @@ import { Worker, Job } from 'bullmq';
 import { getRedis, getImportQueue, SCRAPE_QUEUE, type ScrapeJobData } from '../lib/queues';
 import { updateJobStatus, saveScrapedAlbum } from '../lib/db';
 import { scrapeAlbum } from '../lib/scraper';
-import { translateTitle, generateDescription } from '../lib/ai';
+import { preprocessTitle, translateTitle, generateDescription } from '../lib/ai';
 
 const CONCURRENCY = parseInt(process.env.SCRAPE_CONCURRENCY ?? '5', 10);
 
@@ -31,7 +31,7 @@ export function startScrapeWorker() {
   const worker = new Worker<ScrapeJobData>(
     SCRAPE_QUEUE,
     async (job: Job<ScrapeJobData>) => {
-      const { jobId, url, rawName, rawCategory, rawPrice } = job.data;
+      const { jobId, url, rawName, rawCategory, rawPrice, rawSizes } = job.data;
 
       console.log(`[scrape] job ${jobId} | ${url}`);
       await updateJobStatus(jobId, 'scraping');
@@ -45,7 +45,14 @@ export function startScrapeWorker() {
       if (rawName?.trim()) {
         productName = rawName.trim();
       } else {
-        productName = await translateTitle(album.title || `Product ${album.albumId}`);
+        const base = album.title || `Product ${album.albumId}`;
+        productName = preprocessTitle(base);
+
+        // Only call AI if significant CJK remains after local preprocessing
+        const cjk = (productName.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
+        if (cjk > 0 && cjk / productName.length >= 0.3) {
+          productName = await translateTitle(album.title || `Product ${album.albumId}`);
+        }
       }
 
       // ── 3. Resolve category paths ─────────────────────────────────────
@@ -79,7 +86,7 @@ export function startScrapeWorker() {
         raw_title: album.title,
         translated_name: productName,
         description,
-        category_paths: categoryPaths,   // e.g. [["Men","Sneakers","Nike"],["Sale","Footwear"]]
+        category_paths: categoryPaths,
         images: album.images,
         total_pages: album.totalPages,
       });
@@ -89,15 +96,24 @@ export function startScrapeWorker() {
         `[scrape] ✓ job ${jobId} | "${productName}" | ${album.images.length} images` +
         (categoryPaths.length > 0
           ? ` | ${categoryPaths.length} categor${categoryPaths.length === 1 ? 'y' : 'ies'}`
-          : '')
+          : '') +
+        (rawSizes ? ` | sizes: ${rawSizes}` : '')
       );
 
       // ── 6. Enqueue import job ─────────────────────────────────────────
       const importQueue = getImportQueue();
-      await importQueue.add(`import:${jobId}`, { jobId, rawPrice: rawPrice ?? null }, {
-        // Slight delay so scrape worker can move on before import starts
-        delay: 500,
-      });
+      await importQueue.add(
+        `import:${jobId}`,
+        {
+          jobId,
+          rawPrice: rawPrice ?? null,
+          rawSizes: rawSizes ?? null,
+        },
+        {
+          // Slight delay so scrape worker can move on before import starts
+          delay: 500,
+        }
+      );
     },
     {
       connection: getRedis(),

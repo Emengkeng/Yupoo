@@ -299,7 +299,17 @@ export async function translateTitle(title: string): Promise<string> {
   const cjk = (preprocessed.match(/[\u4e00-\u9fff\u3400-\u4dbf]/g) || []).length;
   if (cjk > 0 && cjk / preprocessed.length >= 0.3) {
     const translated = await grokText(
-      `Translate this product title to English. Reply with only the translated title, nothing else.\n\n"${preprocessed}"`
+      `Translate this product title to a clean English product name. 
+        Rules:
+        - Output only the product name, nothing else
+        - Remove size information (any sequences of numbers like 36 37 38 39...)
+        - Remove product codes (alphanumeric codes like FD9920 002, 677402 W3RA9)
+        - Remove quality grade words (原厂级, 公司级, etc.)
+        - Do not repeat the brand name if it appears in both English and Chinese
+        - Do not mention Yupoo
+        - Maximum 8 words
+
+        Title: "${preprocessed}"`
     );
     return stripYupooFromTitle(expandAbbreviations(translated || preprocessed));
   }

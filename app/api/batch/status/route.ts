@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
           [jobIds]
         ),
         db.query(
-          `SELECT job_id, wc_product_id, wc_product_url, images_uploaded, images_failed
+          `SELECT job_id, wc_product_id, wc_product_url, images_uploaded, images_failed, variations_created
            FROM imported_products WHERE job_id = ANY($1)`,
           [jobIds]
         ),
@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
     // Re-enqueue
     const { getScrapeQueue } = await import('@/lib/queues');
     const jobs = await db.query(
-      `SELECT id, url, raw_name, raw_category, raw_price FROM import_jobs WHERE id = ANY($1)`,
+      `SELECT id, url, raw_name, raw_category, raw_price, raw_sizes FROM import_jobs WHERE id = ANY($1)`,
       [jobIds]
     );
 
@@ -79,6 +79,7 @@ export async function POST(req: NextRequest) {
           rawName: j.raw_name,
           rawCategory: j.raw_category,
           rawPrice: j.raw_price,
+          rawSizes: j.raw_sizes,
         },
       }))
     );

@@ -24,11 +24,13 @@ export interface ScrapeJobData {
   rawName: string | null;
   rawCategory: string | null;
   rawPrice: string | null;
+  rawSizes: string | null;  // e.g. "36-45" or "36,37,38,39"
 }
 
 export interface ImportJobData {
   jobId: number;       // import_jobs.id — album already in scraped_albums
   rawPrice: string | null;
+  rawSizes: string | null;  // passed through from scrape job
 }
 
 // ── Queue names ───────────────────────────────────────────────────────────

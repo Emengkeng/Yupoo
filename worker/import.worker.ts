@@ -11,12 +11,58 @@ import {
   getAllCategories,
   resolveCategoryPath,
   createWcProduct,
+  createWcVariation,
   type WcCategory,
 } from '../lib/woocommerce';
 
 const CONCURRENCY = parseInt(process.env.IMPORT_CONCURRENCY ?? '2', 10);
 const IMAGE_UPLOAD_CONCURRENCY = parseInt(process.env.IMAGE_UPLOAD_CONCURRENCY ?? '1', 10);
 const MAX_IMAGES_PER_PRODUCT = parseInt(process.env.MAX_IMAGES_PER_PRODUCT ?? '4', 10);
+
+// ── Size parsing ──────────────────────────────────────────────────────────
+
+/**
+ * Parse a raw size string into an array of EU size strings.
+ *
+ * Handles:
+ *   "36-45"       → ["36","37","38","39","40","41","42","43","44","45"]
+ *   "36–45"       → same (en-dash)
+ *   "36,37,38"    → ["36","37","38"]
+ *   "36 37 38"    → ["36","37","38"]
+ *   "36.5-40"     → ["36.5","37","37.5","38","38.5","39","39.5","40"]
+ *
+ * Returns [] if the string is empty or unparseable.
+ */
+function parseSizes(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+
+  // Range: "36-45" or "36–45" (with optional .5 half-sizes)
+  const rangeMatch = trimmed.match(/^(\d{2}(?:\.\d)?)\s*[-–—]\s*(\d{2}(?:\.\d)?)$/);
+  if (rangeMatch) {
+    const lo = parseFloat(rangeMatch[1]);
+    const hi = parseFloat(rangeMatch[2]);
+    if (!isNaN(lo) && !isNaN(hi) && lo <= hi && hi - lo <= 20) {
+      const sizes: string[] = [];
+      // Step by 0.5 to support half-sizes; format cleanly (drop trailing .0)
+      for (let s = lo; s <= hi + 0.001; s += 0.5) {
+        const rounded = Math.round(s * 2) / 2;
+        sizes.push(rounded % 1 === 0 ? String(rounded) : rounded.toFixed(1));
+      }
+      return sizes;
+    }
+  }
+
+  // Comma or space list: "36,37,38" or "36 37 38"
+  const tokens = trimmed
+    .split(/[\s,，]+/)
+    .map((s) => s.trim())
+    .filter((s) => /^\d{2}(\.\d)?$/.test(s) && parseFloat(s) >= 34 && parseFloat(s) <= 50);
+
+  return tokens;
+}
+
+// ── Image fetch ───────────────────────────────────────────────────────────
 
 async function fetchImageBuffer(
   imageUrl: string,
@@ -46,11 +92,13 @@ async function fetchImageBuffer(
   return { buffer, contentType, filename };
 }
 
+// ── Worker ────────────────────────────────────────────────────────────────
+
 export function startImportWorker() {
   const worker = new Worker<ImportJobData>(
     IMPORT_QUEUE,
     async (job: Job<ImportJobData>) => {
-      const { jobId, rawPrice } = job.data;
+      const { jobId, rawPrice, rawSizes } = job.data;
 
       console.log(`[import] job ${jobId}`);
       await updateJobStatus(jobId, 'importing');
@@ -59,10 +107,18 @@ export function startImportWorker() {
       const album = await getScrapedAlbum(jobId);
       if (!album) throw new Error(`No scraped album found for job ${jobId}`);
 
+      // ── 2. Parse sizes ────────────────────────────────────────────────
+      const sizes = rawSizes ? parseSizes(rawSizes) : [];
+      const hasVariations = sizes.length > 0;
+
+      if (hasVariations) {
+        console.log(`[import] job ${jobId} | sizes: [${sizes.join(', ')}]`);
+      }
+
       const referer = `https://${album.store_slug}.x.yupoo.com`;
       const imagesToUpload = album.images.slice(1, MAX_IMAGES_PER_PRODUCT + 1);
 
-      // ── 2. Upload images to WordPress concurrently ────────────────────
+      // ── 3. Upload images to WordPress concurrently ────────────────────
       const limit = pLimit(IMAGE_UPLOAD_CONCURRENCY);
 
       // Stagger job starts to avoid synchronized bursts across concurrent jobs
@@ -115,18 +171,7 @@ export function startImportWorker() {
 
       console.log(`[import] job ${jobId} | ${uploaded} images uploaded, ${failed} failed`);
 
-      // ── 3. Resolve categories ─────────────────────────────────────────
-      //
-      // album.category_paths is an array of paths, e.g.:
-      //   [["Men","Sneakers","Nike"], ["Sale","Footwear"]]
-      //
-      // For each path we walk the WooCommerce category tree, creating nodes
-      // that don't exist yet, and collect the leaf node ID.
-      // Duplicate leaf IDs are deduplicated before attaching to the product.
-      //
-      // getAllCategories() is called once up-front; the result is threaded
-      // through each resolveCategoryPath call so newly-created categories are
-      // visible to subsequent paths without extra DB round-trips.
+      // ── 4. Resolve categories ─────────────────────────────────────────
       const resolvedCategoryIds: number[] = [];
 
       if (album.category_paths.length > 0) {
@@ -136,8 +181,6 @@ export function startImportWorker() {
           if (path.length === 0) continue;
           try {
             const { id, cats } = await resolveCategoryPath(path, existingCats);
-            // Thread updated category list to the next iteration so newly
-            // created categories are found locally instead of hitting the API.
             existingCats = cats;
             if (!resolvedCategoryIds.includes(id)) {
               resolvedCategoryIds.push(id);
@@ -157,17 +200,25 @@ export function startImportWorker() {
         );
       }
 
-      // ── 4. Create WooCommerce product ─────────────────────────────────
+      // ── 5. Build attributes ───────────────────────────────────────────
+      // When sizes are present the product is variable with a Size attribute.
+      // Otherwise it's a simple product with no attributes.
+      const attributes = hasVariations
+        ? [{ name: 'Size', visible: true, variation: true, options: sizes }]
+        : [];
+
+      // ── 6. Create WooCommerce product ─────────────────────────────────
       const created = await createWcProduct({
         name: album.translated_name || album.raw_title || `Product ${album.album_id}`,
-        type: 'simple',
+        // Variable type is required for WC to accept variations
+        type: hasVariations ? 'variable' : 'simple',
         description: album.description || '',
         status: 'publish',
-        // WooCommerce accepts an array — each entry is { id: number }
         categories: resolvedCategoryIds.map((id) => ({ id })),
         images: wpImages,
-        attributes: [],
-        regular_price: rawPrice || undefined,
+        attributes,
+        // Price lives on variations for variable products; on the parent for simple
+        regular_price: hasVariations ? undefined : (rawPrice || undefined),
         meta_data: [
           { key: '_yupoo_album_id',  value: album.album_id },
           { key: '_yupoo_album_url', value: album.album_url },
@@ -176,16 +227,43 @@ export function startImportWorker() {
         ],
       });
 
-      console.log(`[import] ✓ job ${jobId} | WC product #${created.id} | "${album.translated_name}"`);
+      console.log(`[import] ✓ job ${jobId} | WC product #${created.id} | "${album.translated_name}" | type: ${hasVariations ? 'variable' : 'simple'}`);
 
-      // ── 5. Save result ────────────────────────────────────────────────
+      // ── 7. Create size variations ─────────────────────────────────────
+      let variationsCreated = 0;
+
+      if (hasVariations) {
+        console.log(`[import] job ${jobId} | creating ${sizes.length} size variations…`);
+
+        for (const size of sizes) {
+          try {
+            await createWcVariation(created.id, {
+              attributes: [{ name: 'Size', option: size }],
+              status: 'publish',
+              regular_price: rawPrice || undefined,
+            });
+            variationsCreated++;
+          } catch (err) {
+            console.warn(
+              `[import] job ${jobId} | size ${size} variation failed: ` +
+              (err instanceof Error ? err.message : String(err))
+            );
+          }
+        }
+
+        console.log(
+          `[import] job ${jobId} | ${variationsCreated}/${sizes.length} size variations created`
+        );
+      }
+
+      // ── 8. Save result ────────────────────────────────────────────────
       await saveImportedProduct({
         job_id: jobId,
         wc_product_id: created.id,
         wc_product_url: `${process.env.WC_URL}/wp-admin/post.php?post=${created.id}&action=edit`,
         images_uploaded: uploaded,
         images_failed: failed,
-        variations_created: 0,
+        variations_created: variationsCreated,
       });
 
       await updateJobStatus(jobId, 'done');

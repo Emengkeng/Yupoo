@@ -13,6 +13,7 @@ interface JobRow {
   raw_name: string | null;
   raw_category: string | null;
   raw_price: string | null;
+  raw_sizes: string | null;
   status: JobStatus;
   error: string | null;
   created_at: string;
@@ -27,6 +28,7 @@ interface JobRow {
     wc_product_url: string;
     images_uploaded: number;
     images_failed: number;
+    variations_created: number;
   } | null;
 }
 
@@ -229,13 +231,14 @@ export default function BatchPage() {
             <span className={styles.sep}>·</span>
             <code>URL | Name | Category/Sub | Price</code>
             <span className={styles.sep}>·</span>
-            <code>URL | Category/Sub | Price</code>
+            <code>URL | Name | Category/Sub | Price | 36-45</code>
             <span className={styles.sep}>·</span>
-            <code>URL | Cat1/Sub;Cat2/Sub</code>
+            <code>URL | Cat1/Sub;Cat2/Sub | Price | 36-45</code>
           </div>
           <div className={styles.formatRules}>
-            <span>Field 2 is auto-detected: <strong>contains /</strong> → category, <strong>no /</strong> → name.</span>
-            <span>Separate multiple categories with <strong>;</strong> e.g. <code>Men/Sneakers/Nike;Sale/Footwear</code> — product is assigned to all of them.</span>
+            <span>Field 2 auto-detected: <strong>contains /</strong> → category, <strong>no /</strong> → name.</span>
+            <span>Sizes are always the <strong>last field</strong> — range <code>36-45</code> or list <code>36,37,38</code>. Creates size variations with shared price.</span>
+            <span>Separate multiple categories with <strong>;</strong> e.g. <code>Men/Sneakers/Nike;Sale/Footwear</code>.</span>
             <span>Name and description are AI-generated when omitted.</span>
           </div>
 
@@ -248,8 +251,9 @@ export default function BatchPage() {
               `https://store.x.yupoo.com/albums/789012 | Boots\n` +
               `https://store.x.yupoo.com/albums/345678 | Men/Sneakers/Nike\n` +
               `https://store.x.yupoo.com/albums/901234 | Men/Sneakers/Nike | 89.99\n` +
-              `https://store.x.yupoo.com/albums/111111 | Air Max 90 | Men/Sneakers/Nike | 120.00\n` +
-              `https://store.x.yupoo.com/albums/222222 | Men/Sneakers/Nike;Sale/Footwear | 75.00`
+              `https://store.x.yupoo.com/albums/111111 | Air Max 90 | Men/Sneakers/Nike | 120.00 | 36-45\n` +
+              `https://store.x.yupoo.com/albums/222222 | Men/Sneakers/Nike | 75.00 | 36,37,38,39,40\n` +
+              `https://store.x.yupoo.com/albums/333333 | Men/Sneakers/Nike;Sale/Footwear | 75.00 | 40-45`
             }
             rows={8}
             spellCheck={false}
@@ -371,6 +375,7 @@ export default function BatchPage() {
                     <th>Product</th>
                     <th>Status</th>
                     <th>Price</th>
+                    <th>Sizes</th>
                     <th>Images</th>
                     <th>WC</th>
                   </tr>
@@ -418,6 +423,13 @@ export default function BatchPage() {
                       <td className={styles.tdPrice}>
                         {job.raw_price ? `$${job.raw_price}` : <span style={{opacity:.3}}>—</span>}
                       </td>
+                      <td className={styles.tdSizes}>
+                        {job.raw_sizes ? (
+                          <span className={styles.sizeBadge}>{job.raw_sizes}</span>
+                        ) : (
+                          <span style={{opacity:.3}}>—</span>
+                        )}
+                      </td>
                       <td className={styles.tdImages}>
                         {job.product
                           ? `${job.product.images_uploaded}${job.product.images_failed > 0 ? ` (${job.product.images_failed} failed)` : ''}`
@@ -427,15 +439,22 @@ export default function BatchPage() {
                       </td>
                       <td className={styles.tdWc}>
                         {job.product ? (
-                          <a
-                            href={job.product.wc_product_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className={styles.wcLink}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            #{job.product.wc_product_id} →
-                          </a>
+                          <div className={styles.wcCell}>
+                            <a
+                              href={job.product.wc_product_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={styles.wcLink}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              #{job.product.wc_product_id} →
+                            </a>
+                            {job.product.variations_created > 0 && (
+                              <span className={styles.variationsBadge}>
+                                {job.product.variations_created}v
+                              </span>
+                            )}
+                          </div>
                         ) : '—'}
                       </td>
                     </tr>

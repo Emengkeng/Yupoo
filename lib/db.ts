@@ -31,6 +31,7 @@ export interface ImportJob {
   raw_name: string | null;
   raw_category: string | null;
   raw_price: string | null;
+  raw_sizes: string | null;  // e.g. "36-45" or "36,37,38,39"
   status: JobStatus;
   error: string | null;
   created_at: Date;
@@ -50,7 +51,6 @@ export interface ScrapedAlbum {
    * Array of category paths.
    * Each inner array is one full path from root to leaf.
    * e.g. [["Men","Sneakers","Nike"], ["Sale","Footwear"]]
-   * The WooCommerce importer assigns the leaf node ID of each path to the product.
    */
   category_paths: string[][];
   images: string[];
@@ -72,12 +72,18 @@ export interface ImportedProduct {
 // ── Job queries ───────────────────────────────────────────────────────────
 
 export async function createJobs(
-  entries: { url: string; raw_name?: string; raw_category?: string; raw_price?: string }[]
+  entries: {
+    url: string;
+    raw_name?: string;
+    raw_category?: string;
+    raw_price?: string;
+    raw_sizes?: string;
+  }[]
 ): Promise<ImportJob[]> {
   if (entries.length === 0) return [];
 
   const values = entries
-    .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+    .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
     .join(', ');
 
   const params = entries.flatMap((e) => [
@@ -85,10 +91,11 @@ export async function createJobs(
     e.raw_name ?? null,
     e.raw_category ?? null,
     e.raw_price ?? null,
+    e.raw_sizes ?? null,
   ]);
 
   const res = await db.query<ImportJob>(
-    `INSERT INTO import_jobs (url, raw_name, raw_category, raw_price)
+    `INSERT INTO import_jobs (url, raw_name, raw_category, raw_price, raw_sizes)
      VALUES ${values}
      RETURNING *`,
     params
@@ -159,7 +166,7 @@ export async function saveScrapedAlbum(data: {
       data.raw_title,
       data.translated_name,
       data.description,
-      JSON.stringify(data.category_paths),   // [["Men","Sneakers","Nike"],...]
+      JSON.stringify(data.category_paths),
       JSON.stringify(data.images),
       data.total_pages,
     ]
@@ -167,7 +174,6 @@ export async function saveScrapedAlbum(data: {
 
   const row = res.rows[0];
 
-  // pg returns JSONB columns as already-parsed JS values, but guard just in case.
   return {
     ...row,
     category_paths: typeof row.category_paths === 'string'

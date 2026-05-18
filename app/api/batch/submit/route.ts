@@ -8,16 +8,40 @@ interface ParsedLine {
   rawName: string | null;
   rawCategory: string | null;
   rawPrice: string | null;
+  rawSizes: string | null;
 }
 
 /**
  * Determines whether a field value looks like a category path.
- *
- * A field is treated as a category if it contains '/' (path separator) or ';'
- * (multiple-path separator). A plain name like "Boots" contains neither.
+ * A field is treated as a category if it contains '/' or ';'.
  */
 function looksLikeCategory(value: string): boolean {
   return value.includes('/') || value.includes(';');
+}
+
+/**
+ * Determines whether a field value looks like a size range or list.
+ *
+ * Matches:
+ *   "36-45"          — EU range with hyphen
+ *   "36–45"          — EU range with en-dash
+ *   "36,37,38,39"    — comma-separated list
+ *   "36 37 38 39"    — space-separated list (4+ entries)
+ *
+ * Must consist only of two-digit numbers (optionally with .5) separated
+ * by hyphens, commas, or spaces. Single numbers are NOT treated as sizes
+ * to avoid misidentifying a short price like "45" as a size range.
+ */
+function looksLikeSizes(value: string): boolean {
+  const trimmed = value.trim();
+  // Range: "36-45" or "36–45" (exactly two size tokens)
+  if (/^\d{2}(\.\d)?\s*[-–—]\s*\d{2}(\.\d)?$/.test(trimmed)) return true;
+  // List: at least two size tokens separated by commas or spaces
+  const tokens = trimmed.split(/[\s,，]+/).filter(Boolean);
+  return (
+    tokens.length >= 2 &&
+    tokens.every((t) => /^\d{2}(\.\d)?$/.test(t) && parseFloat(t) >= 34 && parseFloat(t) <= 50)
+  );
 }
 
 /**
@@ -28,20 +52,20 @@ function looksLikeCategory(value: string): boolean {
  *   URL
  *   URL | Name
  *   URL | Category/Sub
+ *   URL | 36-45
  *   URL | Category/Sub | Price
  *   URL | Name | Category/Sub
  *   URL | Name | Category/Sub | Price
- *   URL | Category/Sub | Price
+ *   URL | Name | Category/Sub | Price | 36-45
+ *   URL | Category/Sub | Price | 36-45
+ *   URL | Name | Category/Sub | 36-45
+ *   URL | Category/Sub | 36-45
+ *   URL | 36,37,38,39
  *
- * Multiple categories (semicolon-separated paths):
- *   URL | Men/Sneakers/Nike;Sale/Footwear
- *   URL | Name | Men/Sneakers/Nike;Sale/Footwear | Price
- *
- * Field 2 auto-detection:
- *   - contains '/' or ';'  → category
- *   - otherwise            → name
- *
- * Price must be a valid number; it is always the last pipe field when present.
+ * Detection order (last field → first):
+ *   1. Sizes  — last field if it looks like a range or list
+ *   2. Price  — next-to-last (after sizes stripped) if numeric
+ *   3. Name / Category — auto-detected by presence of '/' or ';'
  */
 function parseLine(line: string): ParsedLine | null {
   const parts = line.split('|').map((p) => p.trim());
@@ -51,39 +75,49 @@ function parseLine(line: string): ParsedLine | null {
   const parsed = parseYupooUrl(rawUrl);
   if (!parsed) return null;
 
-  // Detect price: last field is numeric (and not a category path)
-  const lastField = parts[parts.length - 1];
-  const lastIsPrice =
-    parts.length > 1 &&
-    !isNaN(parseFloat(lastField)) &&
-    !looksLikeCategory(lastField);
+  let endIdx = parts.length;
 
-  const rawPrice = lastIsPrice ? lastField : null;
-  if (rawPrice && isNaN(parseFloat(rawPrice))) return null;
+  // ── Step 1: peel sizes off the end ───────────────────────────────────
+  let rawSizes: string | null = null;
+  if (endIdx > 1 && looksLikeSizes(parts[endIdx - 1])) {
+    rawSizes = parts[endIdx - 1];
+    endIdx--;
+  }
 
-  // Remaining fields between URL and optional price
-  const middleEnd = lastIsPrice ? parts.length - 1 : parts.length;
-  const middle = parts.slice(1, middleEnd);
+  // ── Step 2: peel price off the end ───────────────────────────────────
+  let rawPrice: string | null = null;
+  if (
+    endIdx > 1 &&
+    !isNaN(parseFloat(parts[endIdx - 1])) &&
+    !looksLikeCategory(parts[endIdx - 1]) &&
+    !looksLikeSizes(parts[endIdx - 1])
+  ) {
+    rawPrice = parts[endIdx - 1];
+    if (isNaN(parseFloat(rawPrice))) rawPrice = null;
+    endIdx--;
+  }
+
+  // ── Step 3: middle fields → name / category ───────────────────────────
+  const middle = parts.slice(1, endIdx);
 
   let rawName: string | null = null;
   let rawCategory: string | null = null;
 
   if (middle.length === 0) {
-    // URL only
+    // URL only (possibly with sizes/price already peeled)
   } else if (middle.length === 1) {
-    // Single middle field — detect by content
     if (looksLikeCategory(middle[0])) {
       rawCategory = middle[0];
     } else {
       rawName = middle[0];
     }
   } else {
-    // Two or more middle fields — first is name, second is category
+    // Two or more: first is name, second is category
     rawName = middle[0] || null;
     rawCategory = middle[1] || null;
   }
 
-  return { url: parsed.canonical, rawName, rawCategory, rawPrice };
+  return { url: parsed.canonical, rawName, rawCategory, rawPrice, rawSizes };
 }
 
 export async function POST(req: NextRequest) {
@@ -122,6 +156,7 @@ export async function POST(req: NextRequest) {
         raw_name: p.rawName ?? undefined,
         raw_category: p.rawCategory ?? undefined,
         raw_price: p.rawPrice ?? undefined,
+        raw_sizes: p.rawSizes ?? undefined,
       }))
     );
 
@@ -134,8 +169,9 @@ export async function POST(req: NextRequest) {
           jobId: job.id,
           url: job.url,
           rawName: job.raw_name,
-          rawCategory: job.raw_category,   // may contain ';' for multiple paths
+          rawCategory: job.raw_category,
           rawPrice: job.raw_price,
+          rawSizes: job.raw_sizes,
         },
       }))
     );
