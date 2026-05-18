@@ -85,30 +85,25 @@ export const CHINESE_PRODUCT_TAGS: Record<string, string> = {
 // These add no product information and should be stripped before AI processing.
 // Order matters: longer/more specific patterns first.
 const TITLE_NOISE_PATTERNS: RegExp[] = [
-  // Leading platform prefixes: "Yupoo-", "Yupoo ", "YUPOO-" — handled early
   /^yupoo[-:\s]*/i,
-
-  // Trailing/inline platform references: "DHgate", "Aliexpress", etc.
   /\bdhgate\b/gi,
   /\baliexpress\b/gi,
   /\btaobao\b/gi,
   /\b1688\b/g,
-
-  // Replica / wholesale marketing phrases that add no product info
   /\b(1:1\s*replica|best fake|high quality replica|good quality|aaa\+?|replica online sale|exclusive cheap|sale outlet online|high quality|cheap replica|copy brand|cheap fake|cheap price|wholesale sale|new designer|for sale online|online from china|sellers online|buy designer|supplier in china|shop now|same as the original|same as original|every designer|online store|online china|online sale|most desired|panglobalbuy|mulebuy|hubbuycn|sell like hot cakes|premium luxury|casual personality|business style|square buckle|classic style|men's|woman|brand new|luxurious|high quality|personality)\b/gi,
-
-  // "Code: XYZ123" — keep the code itself as a product identifier, strip "Code:"
   /\bcode\s*:\s*/gi,
-
-  // Emojis and non-alphanumeric decoration at start/end
   /^[\s\p{Emoji}\p{So}\p{Sk}]+/u,
   /[\s\p{Emoji}\p{So}\p{Sk}]+$/u,
-
-  // "No1", "No. 1" quality claims
   /\bno\.?\s*1\b/gi,
-
-  // Yupoo anywhere (catch residual mid-string occurrences)
   /\byupoo\b/gi,
+
+  // ── ADD THESE ─────────────────────────────────────────────────────────
+  // Product codes: 货号：677402 W3RA9 9000
+  /货号[：:]\s*[\w\s]+/g,
+  // Size block with numbers: 尺码：36 37 38 39...
+  /[尺码数]+[：:]\s*[\d\s.–-]*/g,
+  // Bare size label left at end after numbers stripped: "尺码："
+  /[尺码数]+[：:]\s*$/g,
 ];
 
 // ── Yupoo detection ───────────────────────────────────────────────────────
@@ -230,10 +225,16 @@ export function preprocessTitle(raw: string): string {
   title = stripTitleNoise(title);       // Yupoo + platform/quality noise stripped first
   title = normalizeTokenOrder(title);
   title = expandChineseBrands(title);
-  title = expandAbbreviations(title);
   title = deduplicateBrandNames(title); // remove redundant abbreviations after expansion
+  title = expandAbbreviations(title);
+  title = deduplicateRepeatedPhrases(title);
   title = stripYupooFromTitle(title);   // final safety pass — belt-and-suspenders
   return title;
+}
+
+function deduplicateRepeatedPhrases(name: string): string {
+  // Catches "Balenciaga Balenciaga" → "Balenciaga" (with or without space boundary)
+  return name.replace(/\b(.{4,}?)\s+\1\b/gi, '$1').trim();
 }
 
 // ── Grok API call with 429 retry ──────────────────────────────────────────
