@@ -293,6 +293,7 @@ function descriptionPrompt(productName: string, category: string | null, extra =
 Product name: ${productName}${category ? `\nCategory: ${category}` : ''}
 Keep it concise, factual, and suitable for a fashion/sneaker/accessories store.
 do not mention if it belong to women or men as some product may belong to both categories.
+avoid repeating the product name more than once in the description.
 Do not mention "Yupoo", image hosting platforms, or where the product images are sourced from.${extra}
 Reply with only the description, no quotes, no labels.`;
 }
