@@ -60,7 +60,7 @@ export function startImportWorker() {
       if (!album) throw new Error(`No scraped album found for job ${jobId}`);
 
       const referer = `https://${album.store_slug}.x.yupoo.com`;
-      const imagesToUpload = album.images.slice(0, MAX_IMAGES_PER_PRODUCT);
+      const imagesToUpload = album.images.slice(1, MAX_IMAGES_PER_PRODUCT + 1);
 
       // ── 2. Upload images to WordPress concurrently ────────────────────
       const limit = pLimit(IMAGE_UPLOAD_CONCURRENCY);

@@ -85,8 +85,8 @@ export const CHINESE_PRODUCT_TAGS: Record<string, string> = {
 // These add no product information and should be stripped before AI processing.
 // Order matters: longer/more specific patterns first.
 const TITLE_NOISE_PATTERNS: RegExp[] = [
-  // Leading platform prefixes: "Yupoo-", "Yupoo ", "YUPOO-"
-  /^yupoo[-\s]*/i,
+  // Leading platform prefixes: "Yupoo-", "Yupoo ", "YUPOO-" — handled early
+  /^yupoo[-:\s]*/i,
 
   // Trailing/inline platform references: "DHgate", "Aliexpress", etc.
   /\bdhgate\b/gi,
@@ -94,8 +94,8 @@ const TITLE_NOISE_PATTERNS: RegExp[] = [
   /\btaobao\b/gi,
   /\b1688\b/g,
 
-  // Quality/replica marketing adjectives that add no product info
-  /\b(best fake|high quality replica|good quality|aaa\+?|replica online sale|exclusive cheap|sale outlet online|high quality)\b/gi,
+  // Replica / wholesale marketing phrases that add no product info
+  /\b(1:1\s*replica|best fake|high quality replica|good quality|aaa\+?|replica online sale|exclusive cheap|sale outlet online|high quality|cheap replica|copy brand|cheap fake|cheap price|wholesale sale|new designer|for sale online|online from china|sellers online|buy designer|supplier in china|shop now|same as the original|same as original|every designer|online store|online china|online sale|most desired|panglobalbuy|mulebuy|hubbuycn|sell like hot cakes|premium luxury|casual personality|business style|square buckle|classic style|men's|woman|brand new|luxurious|high quality|personality)\b/gi,
 
   // "Code: XYZ123" — keep the code itself as a product identifier, strip "Code:"
   /\bcode\s*:\s*/gi,
@@ -120,11 +120,16 @@ function containsYupoo(value: string): boolean {
 }
 
 /**
- * Strip "yupoo" from a *title* only.
- * Titles are short — bare word removal is safe here.
+ * Strip "yupoo" from a title — handles leading "YUPOO-" prefix and
+ * any mid-string occurrences. This runs FIRST before other transforms
+ * so downstream logic never sees the word.
  */
 function stripYupooFromTitle(value: string): string {
-  return value.replace(/\s*\byupoo\b\s*/gi, ' ').replace(/\s{2,}/g, ' ').trim();
+  return value
+    .replace(/^yupoo[-:\s]*/i, '')   // "YUPOO-Brand" → "Brand"
+    .replace(/\byupoo\b[-:\s]*/gi, ' ') // mid-string occurrences
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 // ── Helper: expand Chinese brands and product tags ────────────────────────
@@ -179,9 +184,6 @@ export function expandAbbreviations(name: string): string {
  * e.g. "Louis Vuitton Glasses LV Code BG7463"
  *   → expandAbbreviations → "Louis Vuitton Glasses Louis Vuitton Code BG7463"
  *   → deduplicateBrandNames → "Louis Vuitton Glasses Code BG7463"
- *
- * We handle this by detecting when the full brand name already appears and
- * removing the now-redundant abbreviation token.
  */
 function deduplicateBrandNames(name: string): string {
   let result = name;
@@ -189,7 +191,6 @@ function deduplicateBrandNames(name: string): string {
   for (const [abbr, full] of Object.entries(REDUNDANT_ABBR_AFTER_EXPANSION)) {
     if (!result.toLowerCase().includes(full.toLowerCase())) continue;
 
-    // Remove the abbreviation token (case-insensitive, whole word)
     const escaped = abbr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     result = result.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), '');
   }
@@ -200,31 +201,38 @@ function deduplicateBrandNames(name: string): string {
 /**
  * Strip seller noise from a raw scraped Yupoo album title.
  *
+ * Pipeline (order is intentional):
+ *   1. Strip leading/mid "YUPOO-" first — before anything else touches the string
+ *   2. Strip remaining noise patterns
+ *   3. Collapse whitespace
+ *
  * Handles patterns like:
- *   "Yupoo Louis Vuitton Glasses LV Code: BG7463"   → "Louis Vuitton Glasses BG7463"
- *   "YUPOO-Burberry Replica Online Sale Glasses Code: XG3504" → "Burberry Glasses XG3504"
- *   "Best Fake Balenciaga Glasses Code: BG4943"      → "Balenciaga Glasses BG4943"
- *   "DHgate Louis Vuitton Glasses LV Code: UG5815"   → "Louis Vuitton Glasses UG5815"
- *   "Good Quality MiuMiu Glasses Code: UG6585"       → "MiuMiu Glasses UG6585"
- *   "👓 AAA+ Glasses Yupoo No1 High Quality"         → "Glasses" (sent to AI)
+ *   "YUPOO-At Cheap Price Balenciaga Belts Code: NP1890"  → "Balenciaga Belts NP1890"
+ *   "1:1 Replica Louis Vuitton belts LV Code: DP791"      → "Louis Vuitton belts DP791"
+ *   "Buy Cheap Replica Burberry New belt Code: AP3077"    → "Burberry belt AP3077"
+ *   "👓 AAA+ Glasses Yupoo No1 High Quality"              → "Glasses"
  */
 function stripTitleNoise(raw: string): string {
-  let result = raw.trim();
+  // Step 1: strip leading YUPOO- before noise patterns run
+  let result = stripYupooFromTitle(raw.trim());
+
+  // Step 2: apply all noise patterns
   for (const pattern of TITLE_NOISE_PATTERNS) {
     result = result.replace(pattern, ' ');
   }
+
   return result.replace(/\s{2,}/g, ' ').trim();
 }
 
 // ── Master pre-processor ──────────────────────────────────────────────────
 export function preprocessTitle(raw: string): string {
   let title = raw.trim();
-  title = stripTitleNoise(title);       // remove platform/quality noise first
+  title = stripTitleNoise(title);       // Yupoo + platform/quality noise stripped first
   title = normalizeTokenOrder(title);
   title = expandChineseBrands(title);
   title = expandAbbreviations(title);
   title = deduplicateBrandNames(title); // remove redundant abbreviations after expansion
-  title = stripYupooFromTitle(title);   // final safety pass
+  title = stripYupooFromTitle(title);   // final safety pass — belt-and-suspenders
   return title;
 }
 
@@ -306,9 +314,6 @@ export async function translateTitle(title: string): Promise<string> {
  * 1. Ask with a clear instruction not to mention Yupoo.
  * 2. If it still appears, retry once with a stronger correction.
  * 3. If it still appears after retry, return a safe generic description.
- *
- * We never surgically remove the word from a sentence — that risks leaving
- * grammatically broken text in the DB (e.g. "Available on , this sneaker...").
  */
 export async function generateDescription(
   productName: string,
@@ -340,6 +345,10 @@ export async function generateDescription(
  * Batch: translate + generate descriptions for multiple products in one API call.
  * Preferred over calling translateTitle + generateDescription separately —
  * one API call instead of two per product, halving rate limit pressure.
+ *
+ * Name enrichment is folded into the same prompt: the model is instructed to
+ * produce a specific, differentiated name (e.g. "Louis Vuitton Men's Reversible
+ * Leather Belt") rather than a flat "Louis Vuitton Belt" for every product.
  */
 export async function batchEnrich(
   products: { name: string; categoryPath: string[] }[]
@@ -360,16 +369,27 @@ export async function batchEnrich(
 
   const batchPrompt = (extra = '') =>
     `For each product below, return a JSON array where each element has:
-- "translatedName": the product name in English (translate any remaining Chinese if needed, otherwise keep as-is)
-- "description": a 2-sentence English product description for a WooCommerce store
-
-Do not mention "Yupoo", image hosting platforms, or where the product images are sourced from in any field.${extra}
+- "translatedName": a specific, differentiated English product name in title case (5–9 words).
+  - Translate any remaining Chinese words to English.
+  - Use details you know about the product (gender, material, buckle style, silhouette,
+    strap width, closure type, colorway, collection, intended use, etc.) to make each name
+    unique. Do NOT produce the same generic "Brand + Category" name for every item.
+  - Examples of good names:
+      "Louis Vuitton Men's Reversible Monogram Leather Belt"
+      "Balenciaga Wide Logo-Embossed Black Leather Belt"
+      "Burberry Check-Print Canvas Tan Belt"
+      "Cartier Three-Row Screw Stainless Steel Bracelet"
+  - Never include words like "luxury", "premium", "high quality", "replica", "fake",
+    "wholesale", "cheap", "Yupoo", or any platform name.
+- "description": a 2-sentence English product description for a WooCommerce store.
+  Be factual and specific. Do not mention "Yupoo", image platforms, or
+  replica/fake/wholesale language.${extra}
 
 Products:
 ${lines}
 
 Reply with ONLY a valid JSON array, no markdown, no explanation. Example:
-[{"translatedName":"Nike Air Max 90","description":"The Nike Air Max 90 is a classic running shoe..."}]`;
+[{"translatedName":"Louis Vuitton Men's Reversible Monogram Leather Belt","description":"Crafted from supple monogram canvas and smooth calfskin, this reversible belt features a polished gold-tone buckle for versatile styling. It pairs effortlessly with both casual and tailored looks."}]`;
 
   const tryParse = (raw: string): { translatedName: string; description: string }[] | null => {
     try {
@@ -382,8 +402,13 @@ Reply with ONLY a valid JSON array, no markdown, no explanation. Example:
 
   let parsed = tryParse(await grokText(batchPrompt()));
 
-  // If any item contains "yupoo", retry the whole batch once with a stronger instruction
-  if (parsed && parsed.some((item) => containsYupoo(item.translatedName) || containsYupoo(item.description))) {
+  // If any item still contains "yupoo", retry the whole batch once with a stronger instruction
+  if (
+    parsed &&
+    parsed.some(
+      (item) => containsYupoo(item.translatedName) || containsYupoo(item.description)
+    )
+  ) {
     console.warn('[ai] batch result contained "yupoo", retrying with stronger instruction');
     const retried = tryParse(
       await grokText(
@@ -397,12 +422,22 @@ Reply with ONLY a valid JSON array, no markdown, no explanation. Example:
 
   if (parsed) {
     return parsed.map((item) => {
-      const translatedName = stripYupooFromTitle(expandAbbreviations(item.translatedName));
-      // If "yupoo" somehow still appears in a description after two attempts,
-      // use a generic fallback rather than storing broken text.
+      // Post-process the name: expand any abbreviations the model left in,
+      // then strip any residual Yupoo the model somehow injected.
+      let translatedName = stripYupooFromTitle(expandAbbreviations(item.translatedName));
+
+      // If the name is suspiciously short (≤ 2 tokens) or empty, fall back to
+      // the preprocessed base name so we never store a blank product name.
+      if (!translatedName || translatedName.split(' ').length < 2) {
+        // Find the matching preprocessed entry by index (parallel arrays)
+        const idx = parsed!.indexOf(item);
+        translatedName = preprocessed[idx]?.name || translatedName;
+      }
+
       const description = containsYupoo(item.description)
         ? fallbackDescription(translatedName)
         : item.description;
+
       return { translatedName, description };
     });
   }
