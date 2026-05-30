@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq';
 import pLimit from 'p-limit';
-import { getRedis, IMPORT_QUEUE, type ImportJobData } from '../lib/queues';
+import { getRedis, IMPORT_QUEUE, newRedisConnection, type ImportJobData } from '../lib/queues';
 import {
   updateJobStatus,
   getScrapedAlbum,
@@ -284,7 +284,8 @@ export function startImportWorker() {
       await updateJobStatus(jobId, 'done');
     },
     {
-      connection: getRedis(),
+      // connection: getRedis(),
+      connection: newRedisConnection(), // Use separate connection for blocking work
       concurrency: CONCURRENCY,
     }
   );

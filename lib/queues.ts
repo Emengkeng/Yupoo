@@ -16,6 +16,14 @@ export function getRedis(): IORedis {
   return globalForRedis.redis;
 }
 
+// Separate connection factory for workers (blocking commands need their own connection)
+export function newRedisConnection(): IORedis {
+  return new IORedis(process.env.REDIS_URL!, {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+  });
+}
+
 // ── Job data types ────────────────────────────────────────────────────────
 
 export interface ScrapeJobData {
@@ -50,8 +58,8 @@ export function getScrapeQueue(): Queue<ScrapeJobData> {
       defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: { count: 500 },
-        removeOnFail: { count: 500 },
+        removeOnComplete: { count: 100, age: 3600 },
+        removeOnFail:    { count: 100, age: 86400 },
       },
     });
   }
@@ -65,8 +73,8 @@ export function getImportQueue(): Queue<ImportJobData> {
       defaultJobOptions: {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: { count: 500 },
-        removeOnFail: { count: 500 },
+        removeOnComplete: { count: 100, age: 3600 },
+        removeOnFail:    { count: 100, age: 86400 },
       },
     });
   }

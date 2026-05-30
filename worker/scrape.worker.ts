@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq';
-import { getRedis, getImportQueue, SCRAPE_QUEUE, type ScrapeJobData } from '../lib/queues';
+import { getRedis, getImportQueue, SCRAPE_QUEUE, type ScrapeJobData, newRedisConnection } from '../lib/queues';
 import { updateJobStatus, saveScrapedAlbum } from '../lib/db';
 import { scrapeAlbum } from '../lib/scraper';
 import { preprocessTitle, translateTitle, generateDescription } from '../lib/ai';
@@ -116,7 +116,8 @@ export function startScrapeWorker() {
       );
     },
     {
-      connection: getRedis(),
+      // connection: getRedis(),
+      connection: newRedisConnection(), // Use separate connection for blocking work
       concurrency: CONCURRENCY,
     }
   );
