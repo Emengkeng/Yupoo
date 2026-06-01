@@ -85,6 +85,8 @@ export default function BatchPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [retrying, setRetrying] = useState(false);
   const [retryingStuck, setRetryingStuck] = useState(false);
+  const [retryingPending, setRetryingPending] = useState(false);
+
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasActiveJobs = stats
@@ -176,6 +178,16 @@ export default function BatchPage() {
       if (res.ok) await fetchStatus();
     } finally {
       setRetryingStuck(false);
+    }
+  }
+
+  async function handleRetryPending() {
+    setRetryingPending(true);
+    try {
+      const res = await fetch('/api/batch/retry-pending', { method: 'POST' });
+      if (res.ok) await fetchStatus();
+    } finally {
+      setRetryingPending(false);
     }
   }
 
@@ -384,6 +396,17 @@ export default function BatchPage() {
                     {retryingStuck
                       ? 'Retrying…'
                       : `↺ Retry stuck (${(stats?.scraped ?? 0) + (stats?.importing ?? 0)})`}
+                  </button>
+                )}
+                {(stats?.pending ?? 0) > 0 && !hasActiveJobs && (
+                  <button
+                    className={styles.btnRetry}
+                    onClick={handleRetryPending}
+                    disabled={retryingPending}
+                  >
+                    {retryingPending
+                      ? 'Retrying…'
+                      : `↺ Retry pending (${stats?.pending ?? 0})`}
                   </button>
                 )}
                 <button className={styles.btnGhost} onClick={fetchStatus}>↻ Refresh</button>
