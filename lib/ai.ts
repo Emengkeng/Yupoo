@@ -318,7 +318,7 @@ export async function translateTitle(title: string): Promise<string> {
     const translated = await grokText(
       `Translate this product title to a clean English product name. 
         Rules:
-        - Output only the product name, nothing else
+        - Output only the product name(dont make it a single name, it should be a descriptive phrase), nothing else
         - Remove size information (any sequences of numbers like 36 37 38 39...)
         - Remove product codes (alphanumeric codes like FD9920 002, 677402 W3RA9)
         - Remove quality grade words (原厂级, 公司级, etc.)
